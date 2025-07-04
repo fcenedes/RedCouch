@@ -246,23 +246,27 @@ fn op_get(
     // -----------------------------------------------------------------
     // 2.  Hit  → build extras(4B flags=0) + optional key + value
     // -----------------------------------------------------------------
-    let json: String = reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
+    let json: String =
+        reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
 
-    let mut body = Vec::with_capacity(4 + req.key.len() + json.len());
-    body.extend_from_slice(&0u32.to_be_bytes());          // flags
-    if matches!(req.hdr.opcode, GetK | GetKQ) {
-        body.extend_from_slice(req.key);                  // key (for *K opcodes)
-    }
-    body.extend_from_slice(json.as_bytes());              // value
-
-    let extras_len = 4;
-    let key_len_hdr = if matches!(req.hdr.opcode, GetK | GetKQ) {
-        req.key.len() as u16
+    // build extras (flags) and optional key separately
+    let extras = 0u32.to_be_bytes();
+    let key_part = if matches!(req.hdr.opcode, GetK | GetKQ) {
+        req.key
     } else {
-        0
+        &[]
     };
+    let value_part = json.as_bytes();
 
-    send_full(sock, &req, ST_OK, extras_len, key_len_hdr, &body)
+    // send_full now receives the three slices separately
+    send_full(
+        sock,
+        &req,
+        ST_OK,
+        &extras,
+        key_part,
+        value_part,
+    )
 }
 
 /* ------ SET / ADD / REPLACE ------ */
@@ -300,7 +304,7 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     if expiry != 0 {
         with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
     }
-    send_full(sock, &req, ST_OK, 0, 0, &[])
+    send_full(sock, &req, ST_OK, &[], &[], &[])
 }
 
 /* ------------- DELETE ------------- */
@@ -369,7 +373,7 @@ fn op_counter(
     };
 
     /* build and send response: extras=0, keylen=0, body=8-byte counter */
-    send_full(sock, &req, ST_OK, 0, 0, &new_val.to_be_bytes())
+    send_full(sock, &req, ST_OK, &[], &[], &new_val.to_be_bytes())
 }
 
 /* ============================================================
@@ -382,31 +386,33 @@ fn send_simple(
     status: u16,
     body: &[u8],
 ) -> Br<()> {
-    send_full(sock, req, status, 0, 0, body)
+    send_full(sock, req, status, &[], &[], body)
 }
 
 fn send_full(
     sock: &mut TcpStream,
     req: &Request<'_>,
     status: u16,
-    extras_len: u8,
-    key_len: u16,
-    body: &[u8],
+    extras: &[u8],
+    key: &[u8],
+    value: &[u8],
 ) -> Br<()> {
-    let total_body = extras_len as u32 + key_len as u32 + body.len() as u32;
+    let total_body = extras.len() as u32 + key.len() as u32 + value.len() as u32;
 
     let mut hdr = [0u8; 24];
     hdr[0] = MAGIC_RES;
     hdr[1] = req.hdr.opcode as u8;
-    BigEndian::write_u16(&mut hdr[2..4], key_len);
-    hdr[4] = extras_len;
+    BigEndian::write_u16(&mut hdr[2..4], key.len() as u16);
+    hdr[4] = extras.len() as u8;
     BigEndian::write_u16(&mut hdr[6..8], status);
     BigEndian::write_u32(&mut hdr[8..12], total_body);
     BigEndian::write_u32(&mut hdr[12..16], req.hdr.opaque);
-    BigEndian::write_u64(&mut hdr[16..24], 1); // dummy CAS
+    BigEndian::write_u64(&mut hdr[16..24], 1); // fake CAS
 
     sock.write_all(&hdr)?;
-    sock.write_all(body)?;
+    sock.write_all(extras)?;
+    sock.write_all(key)?;     // present only for GETK / GETKQ
+    sock.write_all(value)?;
     Ok(())
 }
 
