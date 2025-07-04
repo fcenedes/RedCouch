@@ -9,7 +9,7 @@
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
-use redis_module::{DetachedFromClient, redis_module, Context, RedisString, Status, ThreadSafeContext, RedisValue};
+use redis_module::{DetachedFromClient, redis_module, Context, RedisString, Status, ThreadSafeContext, RedisValue, RedisError};
 use std::{
     convert::TryInto,
     io::{Read, Write},
@@ -30,6 +30,9 @@ const MAGIC_RES: u8 = 0x81;
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Opcode {
     Get = 0x00,
+    GetQ = 0x09,
+    GetK = 0x0c,
+    GetKQ = 0x0d,
     Set = 0x01,
     Add = 0x02,
     Replace = 0x03,
@@ -44,6 +47,9 @@ impl Opcode {
         use Opcode::*;
         Some(match b {
             0x00 => Get,
+            0x09 => GetQ,
+            0x0c => GetK,
+            0x0d => GetKQ,
             0x01 => Set,
             0x02 => Add,
             0x03 => Replace,
@@ -195,7 +201,7 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
 fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     use Opcode::*;
     match req.hdr.opcode {
-        Get => op_get(req, sock),
+        Get | GetK | GetQ | GetKQ => op_get(req, sock),
         Set | Add | Replace => op_store(req, sock),
         Delete => op_delete(req, sock),
         Increment | Decrement => op_counter(req, sock),
@@ -215,19 +221,48 @@ fn with_ctx<T>(f: impl Fn(&Context) -> T) -> T {
 }
 
 /* ------------ GET ------------ */
-fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+/* ------------ GET / GETQ / GETK / GETKQ ------------ */
+fn op_get(
+    req: Request<'_>,
+    sock: &mut TcpStream,
+) -> Br<()> {
+    use Opcode::*;
     let key = std::str::from_utf8(req.key)?;
     let reply = with_ctx(|ctx| ctx.call("JSON.GET", &[key]))
         .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
-    if let Ok(json) = String::try_from(reply) {
-        let mut body = Vec::with_capacity(4 + json.len());
-        body.extend_from_slice(&0u32.to_be_bytes()); // flags
-        body.extend_from_slice(json.as_bytes());
-        send_full(sock, &req, ST_OK, 4, 0, &body)
-    } else {
-        send_simple(sock, &req, ST_NF, &[])
+    // -----------------------------------------------------------------
+    // 1.  Handle cache-miss + “quiet” variants
+    // -----------------------------------------------------------------
+    let is_quiet = matches!(req.hdr.opcode, GetQ | GetKQ);
+    if matches!(reply, RedisValue::Null) {
+        if is_quiet {
+            return Ok(());                   // quiet miss ⇒ no reply
+        } else {
+            return send_simple(sock, &req, ST_NF, &[]);
+        }
     }
+
+    // -----------------------------------------------------------------
+    // 2.  Hit  → build extras(4B flags=0) + optional key + value
+    // -----------------------------------------------------------------
+    let json: String = reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
+
+    let mut body = Vec::with_capacity(4 + req.key.len() + json.len());
+    body.extend_from_slice(&0u32.to_be_bytes());          // flags
+    if matches!(req.hdr.opcode, GetK | GetKQ) {
+        body.extend_from_slice(req.key);                  // key (for *K opcodes)
+    }
+    body.extend_from_slice(json.as_bytes());              // value
+
+    let extras_len = 4;
+    let key_len_hdr = if matches!(req.hdr.opcode, GetK | GetKQ) {
+        req.key.len() as u16
+    } else {
+        0
+    };
+
+    send_full(sock, &req, ST_OK, extras_len, key_len_hdr, &body)
 }
 
 /* ------ SET / ADD / REPLACE ------ */
@@ -288,38 +323,52 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 }
 
 /* --------- INCR / DECR --------- */
-fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_counter(
+    req: Request<'_>,
+    sock: &mut TcpStream,
+) -> Br<()> {
+    // Extras = delta(8) + initial(8) + expiry(4)  ---> 20 bytes
     if req.extras.len() != 20 {
         return send_simple(sock, &req, ST_ARGS, &[]);
     }
 
-    let delta = BigEndian::read_u64(&req.extras[0..8]) as i64;
+    let delta   = BigEndian::read_u64(&req.extras[0..8])  as i64;
     let initial = BigEndian::read_u64(&req.extras[8..16]) as i64;
-    let expiry = BigEndian::read_u32(&req.extras[16..20]);
+    let expiry  = BigEndian::read_u32(&req.extras[16..20]);
+    let key     = std::str::from_utf8(req.key)?;
 
-    let key = std::str::from_utf8(req.key)?;
+    /* decrement == negative delta */
     let signed = if req.hdr.opcode == Opcode::Decrement {
         -(delta as i64)
     } else {
         delta as i64
     };
 
+    /* ------------------------------------------------------------------
+       Try JSON.NUMINCRBY.  If the key / path is missing RedisJSON returns
+       Null; we then seed the document with the initial value.
+       ------------------------------------------------------------------ */
     let new_val: i64 = match with_ctx(|ctx| {
         ctx.call("JSON.NUMINCRBY", &[key, "$", &signed.to_string()])
     }) {
-        Ok(reply) => {
-            let s: String = reply.try_into().unwrap_or_default();
-            s.parse().unwrap_or(0)
-        }
-        Err(_) => {
+        /* key existed → parse new value */
+        Ok(redis_module::RedisValue::Null) => {
+            // seed and (optionally) set TTL
             with_ctx(|ctx| ctx.call("JSON.SET", &[key, "$", &initial.to_string()])).ok();
             if expiry != 0 {
                 with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
             }
             initial
         }
+        Ok(val) => {
+            // NUMINCRBY returns the number as a JSON string (e.g. "42")
+            let s: String = val.try_into().map_err(|e:RedisError| BridgeErr::Redis(e.to_string()))?;
+            s.parse().unwrap_or(0)
+        }
+        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
 
+    /* build and send response: extras=0, keylen=0, body=8-byte counter */
     send_full(sock, &req, ST_OK, 0, 0, &new_val.to_be_bytes())
 }
 

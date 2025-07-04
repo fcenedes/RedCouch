@@ -85,23 +85,28 @@ pip install redis
 then try 
 
 ```python
-import pylibmc, json, time, redis
+import pylibmc, json, redis, pprint, time
 
-# 1) Binary-protocol client for port 11210
-mc = pylibmc.Client(["127.0.0.1:11210"], binary=True)
+# --- 1.  binary Memcached client (port 11210) --------------------
+mc = pylibmc.Client(["127.0.0.1:11210"],
+                    binary=True,
+                    behaviors={"tcp_nodelay": True})  # <-- binary=True !
 
-# 2) Regular Redis client to verify what is stored
-rd = redis.Redis(host="127.0.0.1", port=6780, decode)
+# --- 2.  normal Redis client (port 6379) -------------------------
+rd = redis.Redis(host="127.0.0.1", port=6780)
 
-# ---------- simple JSON ----------
-mc.set("doc1", json.dumps({"foo": "bar", "num": 1}))
-print("doc1 via memcached:", mc.get("doc1"))
-print("doc1 via redis    :", rd.execute_command("JSON.GET", "doc1"))
+# ---------------- simple JSON ------------------------------------
+doc = {"foo": "bar", "num": 1}
+mc.set("doc1", json.dumps(doc))
+print("doc1 via Memcached:", mc.get("doc1"))          # <-- bytes
+print("doc1 via Redis    :", rd.execute_command("JSON.GET", "doc1"))
 
-# ---------- nested JSON ----------
-mc.set("user:42", json.dumps({
-        "profile": {"name": "Alice", "age": 30},
-        "tags": ["red", "blue"]
-}))
-print("user:42 via redis :", rd.execute_command("JSON.GET", "user:42"))
+# ---------------- nested JSON ------------------------------------
+nested = {"profile": {"name": "Alice", "age": 30}, "tags": ["red", "blue"]}
+mc.set("user:42", json.dumps(nested))
+print("user:42 via Redis :", rd.execute_command("JSON.GET", "user:42"))
+
+# ---------------- counter (INCR) ---------------------------------
+mc.incr("visits", 1, initial_value=0, time=0)
+print("visits after INCR:", rd.execute_command("JSON.GET", "visits"))
 ```
