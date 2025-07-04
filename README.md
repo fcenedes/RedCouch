@@ -107,6 +107,9 @@ mc.set("user:42", json.dumps(nested))
 print("user:42 via Redis :", rd.execute_command("JSON.GET", "user:42"))
 
 # ---------------- counter (INCR) ---------------------------------
-mc.incr("visits", 1, initial_value=0, time=0)
+mc.set("visits", 0)
+mc.incr("visits")
+mc.incr("visits")
+mc.incr("visits")
 print("visits after INCR:", rd.execute_command("JSON.GET", "visits"))
 ```
