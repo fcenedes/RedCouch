@@ -1,0 +1,13 @@
+[package]
+name = "red_couch"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+redis-module = {version = "2.0.7"}
+bytes        = "1"          # convenient byte buffer
+byteorder    = "1"          # read big-endian ints
+thiserror    = "2.0.12"          # nicer error enum
