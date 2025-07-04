@@ -1,9 +1,13 @@
 This is a naive, barely tested redis module to support couchdb-memcached binary protocole
 
-### Source 
+# Source 
 -  https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md
 - https://github.com/RedisLabsModules/redismodule-rs
 
+## Requirements
+
+This requires the RedisJson Module (Redis Stack or Redis 8.X OSS)
+This implementation is incomplete
 
 ## Build
 
@@ -113,3 +117,8 @@ mc.incr("visits")
 mc.incr("visits")
 print("visits after INCR:", rd.execute_command("JSON.GET", "visits"))
 ```
+
+## Disclaimer
+
+Use it as your own risk...
+Good Luck ;-)
