@@ -22,7 +22,7 @@
 | FLUSH | `FLUSH`, `FLUSHQ` | ✅ Implemented | Namespace-isolated: flushes only `rc:*` keys, never `FLUSHDB`. |
 | NOOP | `NOOP` | ✅ Implemented | Returns OK. Used as pipeline terminator. |
 | QUIT | `QUIT`, `QUITQ` | ✅ Implemented | Graceful connection close. |
-| VERSION | `VERSION` | ✅ Implemented | Returns `redcouch 0.1.0`. |
+| VERSION | `VERSION` | ✅ Implemented | Returns `RedCouch 0.1.0`. |
 | STAT | `STAT` | ✅ Implemented | Returns general stats (pid, uptime, version, cmd_get, cmd_set, curr_items, etc.). Settings/items/slabs/conns groups: unsupported (returns empty terminator). |
 | VERBOSITY | `VERBOSITY` | ✅ Implemented | Accepted, returns OK. Logging controlled by Redis module logging, not dynamic verbosity levels. |
 | SASL AUTH | `SASL_LIST_MECHS`, `SASL_AUTH`, `SASL_STEP` | ✅ Stub | Lists "PLAIN". Auth always succeeds. No credential enforcement. Allows SASL-requiring clients to connect. |
@@ -68,8 +68,8 @@ Source: `benchmarks/results/bench_20260402_144029.json` and `stress_20260402_150
 |---|---|---|---|
 | SET 64B | 62,574 | 60 | 100 |
 | SET 1KB | 60,439 | 63 | 104 |
-| GET (hit) | 63,361 | 58 | 95 |
-| Mixed R/W | 35,556 | 108 | 160 |
+| GET (hit) | 50,929 | 76 | 120 |
+| Mixed R/W | 30,138 | 129 | 184 |
 
 ### Stress/Soak Findings
 
@@ -229,7 +229,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ### Pre-Release
 
-- [x] **Binary protocol framing**: all 35 opcodes (0x00–0x22, excluding 0x1F) parsed and dispatched
+- [x] **Binary protocol framing**: all 34 opcodes (0x00–0x22, excluding 0x1F) parsed and dispatched
 - [x] **Item model**: hash-per-item with binary-safe value, flags, CAS, and expiry
 - [x] **CAS correctness**: monotonic counter, atomic Lua-based mutations, CAS-check on store/delete
 - [x] **Expiry semantics**: relative (≤30 days), absolute (>30 days), persist (0), verified via GAT/GATQ
