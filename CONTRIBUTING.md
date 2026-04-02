@@ -35,7 +35,7 @@ cargo clippy --all-targets -- -D warnings
 # Quick check (fastest feedback)
 cargo check --all-targets
 
-# Run all 146 tests (60 binary + 58 ASCII + 28 meta)
+# Run all 221 tests (76 binary + 97 ASCII + 48 meta)
 cargo test
 
 # Lint
