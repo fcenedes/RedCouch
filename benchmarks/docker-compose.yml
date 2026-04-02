@@ -1,0 +1,44 @@
+# Docker Compose for cross-system benchmark comparison
+# Provides isolated Couchbase OSS and Redis OSS targets.
+# RedCouch runs on a local Redis instance with the module loaded (not containerized).
+#
+# Usage:
+#   docker compose -f benchmarks/docker-compose.yml up -d
+#   # Wait for services to be healthy, then run benchmarks
+#   docker compose -f benchmarks/docker-compose.yml down -v
+
+services:
+  # Redis OSS - for native Redis GET/SET/DEL baseline measurement
+  redis-bench:
+    image: redis:8
+    container_name: redcouch-bench-redis
+    ports:
+      - "16380:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
+  # Couchbase Community Edition - for native memcached binary protocol baseline
+  # Uses Couchbase 7.2 Community which supports memcached bucket type
+  couchbase-bench:
+    image: couchbase/server:community-7.2.4
+    container_name: redcouch-bench-couchbase
+    ports:
+      - "8091:8091"    # Web console
+      - "8092:8092"    # Views
+      - "8093:8093"    # Query
+      - "11211:11210"  # KV/memcached binary protocol (mapped to 11211 to avoid RedCouch conflict)
+    environment:
+      - COUCHBASE_ADMINISTRATOR_USERNAME=admin
+      - COUCHBASE_ADMINISTRATOR_PASSWORD=password
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8091/pools || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    restart: "no"

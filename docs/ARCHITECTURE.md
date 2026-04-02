@@ -110,9 +110,9 @@ Binary protocol responses are collected in a write buffer and flushed in a singl
 
 Tests are structured to run without a live Redis instance:
 
-- **`src/protocol.rs`** — 60 binary protocol unit tests (parser round-trips, opcode coverage, frame building, malformed handling)
-- **`src/ascii.rs`** — 58 ASCII protocol tests (47 parser + 11 meta prefix routing)
-- **`src/meta.rs`** — 28 meta protocol tests (parser, flag validation, mode validation, numeric tokens, bare-flag rejection)
+- **`src/protocol.rs`** — 76 binary protocol unit tests (parser round-trips, opcode coverage, frame building, malformed handling, SASL/admin opcodes, legacy wrappers)
+- **`src/ascii.rs`** — 97 ASCII protocol tests (parser, error paths, key validation, meta prefix routing)
+- **`src/meta.rs`** — 48 meta protocol tests (parser, flag validation, mode validation, numeric tokens, bare-flag rejection, edge cases)
 - **`tests/integration/`** — E2E tests requiring a live Redis 8+ instance with the module loaded
 
 All protocol/parser modules use `#[cfg(not(test))]` guards to exclude Redis allocator dependencies during `cargo test`, enabling host-process testing without Redis.
