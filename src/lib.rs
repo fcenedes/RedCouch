@@ -481,7 +481,11 @@ type Br<T> = Result<T, BridgeErr>;
 
 #[cfg(not(test))]
 fn handle_conn(sock: &mut TcpStream) -> Br<()> {
-    let mut buf = BytesMut::with_capacity(4096);
+    let mut buf = BytesMut::with_capacity(16384);
+    // Response write buffer — all responses for a batch of parsed requests
+    // are collected here and flushed in a single write_all() call, reducing
+    // the number of syscalls from O(responses * 4) to O(1) per read cycle.
+    let mut out = Vec::with_capacity(8192);
 
     loop {
         // Guard against unbounded buffer growth.
@@ -490,7 +494,7 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
             return Ok(());
         }
 
-        let mut tmp = [0u8; 4096];
+        let mut tmp = [0u8; 16384];
         match sock.read(&mut tmp) {
             Ok(0) => return Ok(()),
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
@@ -507,7 +511,7 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
         loop {
             match try_parse_request(&buf) {
                 ParseResult::Ok((req, used)) => {
-                    handle(req, sock)?;
+                    handle(req, &mut out)?;
                     buf.advance(used);
                 }
                 ParseResult::Incomplete => break,
@@ -517,15 +521,28 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
                 }
                 ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
                     eprintln!("[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
-                    write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
+                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
                     buf.advance(bytes_to_skip);
                 }
                 ParseResult::OversizedFrame { opaque, opcode_byte } => {
                     eprintln!("[redcouch] oversized frame (opcode 0x{opcode_byte:02x}), closing connection");
-                    write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Frame too large")?;
+                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Frame too large")?;
+                    // Flush the error response before closing.
+                    if !out.is_empty() {
+                        use std::io::Write;
+                        sock.write_all(&out)?;
+                        out.clear();
+                    }
                     return Ok(());
                 }
             }
+        }
+
+        // Flush all batched responses in a single write_all() call.
+        if !out.is_empty() {
+            use std::io::Write;
+            sock.write_all(&out)?;
+            out.clear();
         }
     }
 }
@@ -535,13 +552,13 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
    ========================================================= */
 
 #[cfg(not(test))]
-fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn handle(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = match req.hdr.opcode {
         Some(op) => op,
         None => {
             // Unknown opcode — respond with ST_UNK and continue.
             write_error_for_raw_opcode(
-                sock,
+                out,
                 req.hdr.opcode_byte,
                 ST_UNK,
                 req.hdr.opaque,
@@ -553,27 +570,27 @@ fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
     use Opcode::*;
     match opcode.base() {
-        Get | GetK => op_get(req, sock),
-        Set | Add | Replace => op_store(req, sock),
-        Delete => op_delete(req, sock),
-        Increment | Decrement => op_counter(req, sock),
-        Touch => op_touch(req, sock),
-        GAT => op_gat(req, sock),
-        Append | Prepend => op_append_prepend(req, sock),
-        Flush => op_flush(req, sock),
-        Version => op_version(req, sock),
-        Stat => op_stat(req, sock),
-        Verbosity => op_verbosity(req, sock),
-        SaslListMechs => op_sasl_list_mechs(req, sock),
-        SaslAuth => op_sasl_auth(req, sock),
-        SaslStep => op_sasl_step(req, sock),
+        Get | GetK => op_get(req, out),
+        Set | Add | Replace => op_store(req, out),
+        Delete => op_delete(req, out),
+        Increment | Decrement => op_counter(req, out),
+        Touch => op_touch(req, out),
+        GAT => op_gat(req, out),
+        Append | Prepend => op_append_prepend(req, out),
+        Flush => op_flush(req, out),
+        Version => op_version(req, out),
+        Stat => op_stat(req, out),
+        Verbosity => op_verbosity(req, out),
+        SaslListMechs => op_sasl_list_mechs(req, out),
+        SaslAuth => op_sasl_auth(req, out),
+        SaslStep => op_sasl_step(req, out),
         Noop => {
-            write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
             Ok(())
         }
         Quit => {
             if !opcode.is_quiet() {
-                write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+                write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
             }
             Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into())
         }
@@ -581,7 +598,7 @@ fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         // remaining arms are unreachable.
         _ => {
             write_error_for_raw_opcode(
-                sock, req.hdr.opcode_byte, ST_UNK, req.hdr.opaque,
+                out, req.hdr.opcode_byte, ST_UNK, req.hdr.opaque,
                 b"Unknown command",
             )?;
             Ok(())
@@ -628,7 +645,7 @@ fn eval_str(v: &RedisValue) -> String {
 
 /* ------------ GET / GETQ / GETK / GETKQ ------------ */
 #[cfg(not(test))]
-fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(req.key);
@@ -658,7 +675,7 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         if opcode.is_quiet() {
             return Ok(());
         }
-        write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -680,7 +697,7 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     };
 
     write_response(
-        sock, opcode, ST_OK, req.hdr.opaque, cas,
+        out, opcode, ST_OK, req.hdr.opaque, cas,
         &extras, key_part, &value_bytes,
     )?;
     Ok(())
@@ -688,13 +705,13 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------ SET / ADD / REPLACE (and quiet variants) ------ */
 #[cfg(not(test))]
-fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let base = opcode.base();
     STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 8 {
-        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -756,7 +773,7 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             }
             if !opcode.is_quiet() {
                 write_response(
-                    sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
                 )?;
             }
         }
@@ -765,14 +782,14 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             if is_cas_op {
                 STAT_CAS_MISSES.fetch_add(1, Ordering::Relaxed);
             }
-            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -2 => {
             // KEY_EXISTS (ADD on existing key, or CAS mismatch)
             if is_cas_op {
                 STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed);
             }
-            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
             return Err(BridgeErr::Redis(format!("EVAL store unknown status: {status_code}")));
@@ -783,7 +800,7 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------------- DELETE / DELETEQ ------------- */
 #[cfg(not(test))]
-fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let rk = make_redis_key(req.key);
     let req_cas = req.hdr.cas.to_string();
@@ -819,16 +836,16 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             // For DELETE success, we don't return the old CAS — just a non-zero one.
             // Use a fresh CAS from the counter for the response.
             let new_cas = get_next_cas();
-            write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+            write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
         }
         -1 => {
             STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
             // NOT_FOUND
-            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -2 => {
             // KEY_EXISTS (CAS mismatch)
-            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
             return Err(BridgeErr::Redis(format!("EVAL delete unknown status: {status_code}")));
@@ -848,12 +865,12 @@ fn get_next_cas() -> u64 {
 
 /* --------- INCR / DECR (and quiet variants) --------- */
 #[cfg(not(test))]
-fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let base = opcode.base();
 
     if req.extras.len() != 20 {
-        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -911,7 +928,7 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             let counter_val: u64 = value_str.parse().unwrap_or(0);
             if !opcode.is_quiet() {
                 write_response(
-                    sock, opcode, ST_OK, req.hdr.opaque, new_cas,
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas,
                     &[], &[], &counter_val.to_be_bytes(),
                 )?;
             }
@@ -923,12 +940,12 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
                 STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed);
             }
             // NOT_FOUND (0xFFFFFFFF expiry)
-            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -3 => {
             // Non-numeric value
             write_simple_response(
-                sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO,
+                out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO,
                 b"Non-numeric value",
             )?;
         }
@@ -941,12 +958,12 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------------- TOUCH ------------- */
 #[cfg(not(test))]
-fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 4 {
-        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -984,11 +1001,11 @@ fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     match status_code {
         0 => {
             if !opcode.is_quiet() {
-                write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+                write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
             }
         }
         -1 => {
-            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
             return Err(BridgeErr::Redis(format!("EVAL touch unknown status: {status_code}")));
@@ -999,13 +1016,13 @@ fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------------- GAT (Get And Touch) ------------- */
 #[cfg(not(test))]
-fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
     STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 4 {
-        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -1040,7 +1057,7 @@ fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         if opcode.is_quiet() {
             return Ok(());
         }
-        write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -1057,7 +1074,7 @@ fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     };
 
     write_response(
-        sock, opcode, ST_OK, req.hdr.opaque, cas,
+        out, opcode, ST_OK, req.hdr.opaque, cas,
         &extras, key_part, &value_bytes,
     )?;
     Ok(())
@@ -1065,7 +1082,7 @@ fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------------- APPEND / PREPEND ------------- */
 #[cfg(not(test))]
-fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let base = opcode.base();
     // Append/Prepend are mutation commands; count under cmd_set
@@ -1074,7 +1091,7 @@ fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
     // Append/Prepend: no extras expected, key + value in body.
     if !req.extras.is_empty() {
-        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -1115,17 +1132,17 @@ fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         0 => {
             if !opcode.is_quiet() {
                 write_response(
-                    sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
                 )?;
             }
         }
         -5 => {
             // NOT_STORED — key does not exist
-            write_simple_response(sock, opcode, ST_NOT_STORED, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_NOT_STORED, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -2 => {
             // CAS mismatch
-            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
             return Err(BridgeErr::Redis(format!("EVAL append/prepend unknown status: {status_code}")));
@@ -1136,7 +1153,7 @@ fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 /* ------------- FLUSH ------------- */
 #[cfg(not(test))]
-fn op_flush(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_flush(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_CMD_FLUSH.fetch_add(1, Ordering::Relaxed);
 
@@ -1165,17 +1182,17 @@ return count
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if !opcode.is_quiet() {
-        write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+        write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
     }
     Ok(())
 }
 
 /* ------------- VERSION ------------- */
 #[cfg(not(test))]
-fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_version(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let version = b"RedCouch 0.1.0";
-    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, version)?;
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, version)?;
     Ok(())
 }
 
@@ -1185,10 +1202,10 @@ fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 /// GA behavior: returns "PLAIN" so clients know the mechanism is available.
 /// No actual authentication is enforced in this GA release.
 #[cfg(not(test))]
-fn op_sasl_list_mechs(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_sasl_list_mechs(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
-    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, b"PLAIN")?;
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, b"PLAIN")?;
     Ok(())
 }
 
@@ -1198,7 +1215,7 @@ fn op_sasl_list_mechs(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 /// When real auth enforcement is needed post-GA, this handler should
 /// validate credentials against a configured source.
 #[cfg(not(test))]
-fn op_sasl_auth(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_sasl_auth(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
 
@@ -1207,7 +1224,7 @@ fn op_sasl_auth(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     if mechanism != "PLAIN" {
         STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
         write_simple_response(
-            sock, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+            out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
             b"Unsupported SASL mechanism",
         )?;
         return Ok(());
@@ -1216,7 +1233,7 @@ fn op_sasl_auth(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     // PLAIN auth: accept any credentials for GA.
     // The value field contains the PLAIN payload: \0<username>\0<password>
     write_simple_response(
-        sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
         b"Authenticated",
     )?;
     Ok(())
@@ -1226,12 +1243,12 @@ fn op_sasl_auth(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 /// GA behavior: PLAIN is single-step, so any SASL_STEP is unexpected.
 /// Return ST_AUTH_ERROR to signal the handshake is already complete.
 #[cfg(not(test))]
-fn op_sasl_step(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_sasl_step(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
     STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
     write_simple_response(
-        sock, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+        out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
         b"SASL step not expected for PLAIN mechanism",
     )?;
     Ok(())
@@ -1262,7 +1279,7 @@ return count
 /// - If the request key names a group we don't support, return empty
 ///   (just the terminator).
 #[cfg(not(test))]
-fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let stat_key = std::str::from_utf8(req.key).unwrap_or("");
 
@@ -1319,7 +1336,7 @@ fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
             for (name, value) in &stats {
                 write_response(
-                    sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+                    out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
                     &[], name.as_bytes(), value.as_bytes(),
                 )?;
             }
@@ -1332,7 +1349,7 @@ fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
     // Terminator: empty key + empty value.
     write_response(
-        sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
         &[], &[], &[],
     )?;
     Ok(())
@@ -1345,9 +1362,9 @@ fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 /// currently support dynamic verbosity levels; logging is controlled
 /// by Redis module logging.
 #[cfg(not(test))]
-fn op_verbosity(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+fn op_verbosity(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
-    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
     Ok(())
 }
 
