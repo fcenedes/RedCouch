@@ -20,31 +20,84 @@ const VERSION_STRING: &str = "VERSION RedCouch 0.1.0";
 
 #[derive(Debug, PartialEq)]
 enum AsciiCmd<'a> {
-    Store { cmd: StoreOp, key: &'a [u8], flags: u32, exptime: u32, bytes: u32, noreply: bool },
-    Cas { key: &'a [u8], flags: u32, exptime: u32, bytes: u32, cas_unique: u64, noreply: bool },
-    AppendPrepend { is_prepend: bool, key: &'a [u8], bytes: u32, noreply: bool },
-    Retrieval { cmd: RetrievalOp, exptime: Option<u32>, keys: Vec<&'a [u8]> },
-    Delete { key: &'a [u8], noreply: bool },
-    Counter { is_decr: bool, key: &'a [u8], value: u64, noreply: bool },
-    Touch { key: &'a [u8], exptime: u32, noreply: bool },
-    FlushAll { _delay: u32, noreply: bool },
+    Store {
+        cmd: StoreOp,
+        key: &'a [u8],
+        flags: u32,
+        exptime: u32,
+        bytes: u32,
+        noreply: bool,
+    },
+    Cas {
+        key: &'a [u8],
+        flags: u32,
+        exptime: u32,
+        bytes: u32,
+        cas_unique: u64,
+        noreply: bool,
+    },
+    AppendPrepend {
+        is_prepend: bool,
+        key: &'a [u8],
+        bytes: u32,
+        noreply: bool,
+    },
+    Retrieval {
+        cmd: RetrievalOp,
+        exptime: Option<u32>,
+        keys: Vec<&'a [u8]>,
+    },
+    Delete {
+        key: &'a [u8],
+        noreply: bool,
+    },
+    Counter {
+        is_decr: bool,
+        key: &'a [u8],
+        value: u64,
+        noreply: bool,
+    },
+    Touch {
+        key: &'a [u8],
+        exptime: u32,
+        noreply: bool,
+    },
+    FlushAll {
+        _delay: u32,
+        noreply: bool,
+    },
     Version,
-    Stats { args: Option<&'a str> },
-    Verbosity { noreply: bool },
+    Stats {
+        args: Option<&'a str>,
+    },
+    Verbosity {
+        noreply: bool,
+    },
     Quit,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum StoreOp { Set, Add, Replace }
+enum StoreOp {
+    Set,
+    Add,
+    Replace,
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum RetrievalOp { Get, Gets, Gat, Gats }
+enum RetrievalOp {
+    Get,
+    Gets,
+    Gat,
+    Gats,
+}
 
 #[derive(Debug)]
 enum CmdParseResult<'a> {
     Ok(AsciiCmd<'a>),
     UnknownCommand,
-    ClientError(#[allow(dead_code)] String),
+    // The String payload is read by the `#[cfg(not(test))]` connection
+    // handler but appears unused under `--all-targets` test builds.
+    ClientError(#[cfg_attr(test, allow(dead_code))] String),
 }
 
 // ── Line extraction ─────────────────────────────────────────────────
@@ -78,11 +131,13 @@ pub(crate) fn validate_key(key: &[u8]) -> Result<(), String> {
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
-    s.parse::<u32>().map_err(|_| "bad command line format".to_string())
+    s.parse::<u32>()
+        .map_err(|_| "bad command line format".to_string())
 }
 
 fn parse_u64(s: &str) -> Result<u64, String> {
-    s.parse::<u64>().map_err(|_| "bad command line format".to_string())
+    s.parse::<u64>()
+        .map_err(|_| "bad command line format".to_string())
 }
 
 // ── Individual command parsers ──────────────────────────────────────
@@ -94,10 +149,21 @@ fn parse_store_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> Cmd
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
-    let flags = match parse_u32(args[1]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
-    let exptime = match parse_u32(args[2]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
-    let bytes = match parse_u32(args[3]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
+    let flags = match parse_u32(args[1]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
+    let exptime = match parse_u32(args[2]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
+    let bytes = match parse_u32(args[3]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let noreply = args.len() == 5 && args[4] == "noreply";
     if args.len() == 5 && args[4] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
@@ -108,7 +174,14 @@ fn parse_store_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> Cmd
         "replace" => StoreOp::Replace,
         _ => unreachable!(),
     };
-    CmdParseResult::Ok(AsciiCmd::Store { cmd, key, flags, exptime, bytes, noreply })
+    CmdParseResult::Ok(AsciiCmd::Store {
+        cmd,
+        key,
+        flags,
+        exptime,
+        bytes,
+        noreply,
+    })
 }
 
 /// cas <key> <flags> <exptime> <bytes> <cas_unique> [noreply]\r\n
@@ -117,48 +190,96 @@ fn parse_cas_cmd<'a>(args: &[&'a str], _line: &'a [u8]) -> CmdParseResult<'a> {
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
-    let flags = match parse_u32(args[1]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
-    let exptime = match parse_u32(args[2]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
-    let bytes = match parse_u32(args[3]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
-    let cas_unique = match parse_u64(args[4]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
+    let flags = match parse_u32(args[1]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
+    let exptime = match parse_u32(args[2]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
+    let bytes = match parse_u32(args[3]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
+    let cas_unique = match parse_u64(args[4]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let noreply = args.len() == 6 && args[5] == "noreply";
     if args.len() == 6 && args[5] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
     }
-    CmdParseResult::Ok(AsciiCmd::Cas { key, flags, exptime, bytes, cas_unique, noreply })
+    CmdParseResult::Ok(AsciiCmd::Cas {
+        key,
+        flags,
+        exptime,
+        bytes,
+        cas_unique,
+        noreply,
+    })
 }
 
-
 /// append/prepend <key> <bytes> [noreply]\r\n
-fn parse_append_prepend_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> CmdParseResult<'a> {
+fn parse_append_prepend_cmd<'a>(
+    cmd_name: &str,
+    args: &[&'a str],
+    _line: &'a [u8],
+) -> CmdParseResult<'a> {
     if args.len() < 2 || args.len() > 3 {
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
-    let bytes = match parse_u32(args[1]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
+    let bytes = match parse_u32(args[1]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let noreply = args.len() == 3 && args[2] == "noreply";
     if args.len() == 3 && args[2] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let is_prepend = cmd_name == "prepend";
-    CmdParseResult::Ok(AsciiCmd::AppendPrepend { is_prepend, key, bytes, noreply })
+    CmdParseResult::Ok(AsciiCmd::AppendPrepend {
+        is_prepend,
+        key,
+        bytes,
+        noreply,
+    })
 }
 
 /// get/gets <key>*\r\n
-fn parse_retrieval_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> CmdParseResult<'a> {
+fn parse_retrieval_cmd<'a>(
+    cmd_name: &str,
+    args: &[&'a str],
+    _line: &'a [u8],
+) -> CmdParseResult<'a> {
     if args.is_empty() {
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let mut keys = Vec::with_capacity(args.len());
     for &k in args {
         let kb = k.as_bytes();
-        if let Err(e) = validate_key(kb) { return CmdParseResult::ClientError(e); }
+        if let Err(e) = validate_key(kb) {
+            return CmdParseResult::ClientError(e);
+        }
         keys.push(kb);
     }
-    let cmd = if cmd_name == "gets" { RetrievalOp::Gets } else { RetrievalOp::Get };
-    CmdParseResult::Ok(AsciiCmd::Retrieval { cmd, exptime: None, keys })
+    let cmd = if cmd_name == "gets" {
+        RetrievalOp::Gets
+    } else {
+        RetrievalOp::Get
+    };
+    CmdParseResult::Ok(AsciiCmd::Retrieval {
+        cmd,
+        exptime: None,
+        keys,
+    })
 }
 
 /// gat/gats <exptime> <key>*\r\n
@@ -166,15 +287,28 @@ fn parse_gat_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> CmdPa
     if args.len() < 2 {
         return CmdParseResult::ClientError("bad command line format".into());
     }
-    let exptime = match parse_u32(args[0]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    let exptime = match parse_u32(args[0]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let mut keys = Vec::with_capacity(args.len() - 1);
     for &k in &args[1..] {
         let kb = k.as_bytes();
-        if let Err(e) = validate_key(kb) { return CmdParseResult::ClientError(e); }
+        if let Err(e) = validate_key(kb) {
+            return CmdParseResult::ClientError(e);
+        }
         keys.push(kb);
     }
-    let cmd = if cmd_name == "gats" { RetrievalOp::Gats } else { RetrievalOp::Gat };
-    CmdParseResult::Ok(AsciiCmd::Retrieval { cmd, exptime: Some(exptime), keys })
+    let cmd = if cmd_name == "gats" {
+        RetrievalOp::Gats
+    } else {
+        RetrievalOp::Gat
+    };
+    CmdParseResult::Ok(AsciiCmd::Retrieval {
+        cmd,
+        exptime: Some(exptime),
+        keys,
+    })
 }
 
 /// delete <key> [noreply]\r\n
@@ -183,7 +317,9 @@ fn parse_delete_cmd<'a>(args: &[&'a str], _line: &'a [u8]) -> CmdParseResult<'a>
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
     let noreply = args.len() == 2 && args[1] == "noreply";
     if args.len() == 2 && args[1] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
@@ -197,14 +333,24 @@ fn parse_counter_cmd<'a>(cmd_name: &str, args: &[&'a str], _line: &'a [u8]) -> C
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
-    let value = match parse_u64(args[1]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
+    let value = match parse_u64(args[1]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let noreply = args.len() == 3 && args[2] == "noreply";
     if args.len() == 3 && args[2] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let is_decr = cmd_name == "decr";
-    CmdParseResult::Ok(AsciiCmd::Counter { is_decr, key, value, noreply })
+    CmdParseResult::Ok(AsciiCmd::Counter {
+        is_decr,
+        key,
+        value,
+        noreply,
+    })
 }
 
 /// touch <key> <exptime> [noreply]\r\n
@@ -213,13 +359,22 @@ fn parse_touch_cmd<'a>(args: &[&'a str], _line: &'a [u8]) -> CmdParseResult<'a> 
         return CmdParseResult::ClientError("bad command line format".into());
     }
     let key = args[0].as_bytes();
-    if let Err(e) = validate_key(key) { return CmdParseResult::ClientError(e); }
-    let exptime = match parse_u32(args[1]) { Ok(v) => v, Err(e) => return CmdParseResult::ClientError(e) };
+    if let Err(e) = validate_key(key) {
+        return CmdParseResult::ClientError(e);
+    }
+    let exptime = match parse_u32(args[1]) {
+        Ok(v) => v,
+        Err(e) => return CmdParseResult::ClientError(e),
+    };
     let noreply = args.len() == 3 && args[2] == "noreply";
     if args.len() == 3 && args[2] != "noreply" {
         return CmdParseResult::ClientError("bad command line format".into());
     }
-    CmdParseResult::Ok(AsciiCmd::Touch { key, exptime, noreply })
+    CmdParseResult::Ok(AsciiCmd::Touch {
+        key,
+        exptime,
+        noreply,
+    })
 }
 
 /// flush_all [delay] [noreply]\r\n
@@ -235,7 +390,10 @@ fn parse_flush_cmd<'a>(args: &[&'a str]) -> CmdParseResult<'a> {
             return CmdParseResult::ClientError("bad command line format".into());
         }
     }
-    CmdParseResult::Ok(AsciiCmd::FlushAll { _delay: delay, noreply })
+    CmdParseResult::Ok(AsciiCmd::FlushAll {
+        _delay: delay,
+        noreply,
+    })
 }
 
 /// Top-level command line parser.
@@ -279,72 +437,39 @@ fn parse_command_line(line: &[u8]) -> CmdParseResult<'_> {
     }
 }
 
-// ── Hex encoding helper ─────────────────────────────────────────────
-
-/// Hex digit lookup table for `hex_encode`.
-///
-/// NOTE: `hex_encode` is currently unused — the Lua scripts handle
-/// hex encoding server-side.  Kept as a utility for potential future
-/// callers.  Not on any runtime hot path today.
-#[allow(dead_code)]
-const HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
-
-/// Encode raw bytes as lowercase hex pairs.
-///
-/// Uses direct table lookup instead of `fmt::Write` per byte.
-///
-/// NOTE: This helper is currently unused at runtime — Lua scripts
-/// perform hex encoding inside Redis.  It is retained as a utility
-/// for potential future callers and is **not** on a hot path today.
-#[allow(dead_code)]
-fn hex_encode(data: &[u8]) -> String {
-    let mut s = String::with_capacity(data.len() * 2);
-    for &b in data {
-        s.push(HEX_CHARS[(b >> 4) as usize] as char);
-        s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-    }
-    s
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Runtime connection handler (compiled out in unit-test builds)
 // ═══════════════════════════════════════════════════════════════════
 
+#[cfg(not(test))]
+use crate::meta::{
+    MetaCmd, MetaFlag, MetaParseResult, get_flag_token, has_flag, parse_meta_command,
+    validate_ma_flags, validate_md_flags, validate_me_flags, validate_mg_flags, validate_mn_flags,
+    validate_ms_flags, write_meta_flag_echo,
+};
+#[cfg(not(test))]
+use crate::protocol::MAX_BODY_LEN;
+#[cfg(not(test))]
+use crate::{
+    Br, BridgeErr, CAS_COUNTER_KEY, MAX_CONNECTIONS, SCRIPT_APPEND, SCRIPT_COUNT_ITEMS,
+    SCRIPT_COUNTER, SCRIPT_DELETE, SCRIPT_FLUSH, SCRIPT_GAT, SCRIPT_GET, SCRIPT_META_GET,
+    SCRIPT_PREPEND, SCRIPT_STORE, SCRIPT_TOUCH, STARTUP_INSTANT, STAT_AUTH_CMDS, STAT_AUTH_ERRORS,
+    STAT_CAS_BADVAL, STAT_CAS_HITS, STAT_CAS_MISSES, STAT_CMD_FLUSH, STAT_CMD_GET, STAT_CMD_SET,
+    STAT_CMD_TOUCH, STAT_CURR_CONNECTIONS, STAT_DECR_HITS, STAT_DECR_MISSES, STAT_DELETE_HITS,
+    STAT_DELETE_MISSES, STAT_GET_HITS, STAT_GET_MISSES, STAT_INCR_HITS, STAT_INCR_MISSES,
+    STAT_REJECTED_CONNECTIONS, STAT_TOTAL_CONNECTIONS, eval_int, eval_lua, eval_str, hex_decode,
+    is_redis_error, make_redis_key, with_ctx,
+};
+#[cfg(not(test))]
+use bytes::{Buf, BytesMut};
+#[cfg(not(test))]
+use redis_module::RedisValue;
 #[cfg(not(test))]
 use std::io::Read;
 #[cfg(not(test))]
 use std::net::TcpStream;
 #[cfg(not(test))]
 use std::sync::atomic::Ordering;
-#[cfg(not(test))]
-use bytes::{Buf, BytesMut};
-#[cfg(not(test))]
-use crate::{
-    Br, BridgeErr, with_ctx, eval_int, eval_str, hex_decode, make_redis_key, eval_lua,
-    CAS_COUNTER_KEY,
-    SCRIPT_STORE, SCRIPT_GET, SCRIPT_DELETE,
-    SCRIPT_COUNTER, SCRIPT_TOUCH, SCRIPT_GAT, SCRIPT_APPEND, SCRIPT_PREPEND,
-    SCRIPT_META_GET, SCRIPT_FLUSH, SCRIPT_COUNT_ITEMS,
-    MAX_CONNECTIONS,
-    STAT_CMD_GET, STAT_CMD_SET, STAT_CMD_FLUSH, STAT_CMD_TOUCH,
-    STAT_GET_HITS, STAT_GET_MISSES, STAT_DELETE_HITS, STAT_DELETE_MISSES,
-    STAT_INCR_HITS, STAT_INCR_MISSES, STAT_DECR_HITS, STAT_DECR_MISSES,
-    STAT_CAS_HITS, STAT_CAS_MISSES, STAT_CAS_BADVAL,
-    STAT_CURR_CONNECTIONS, STAT_TOTAL_CONNECTIONS,
-    STAT_AUTH_CMDS, STAT_AUTH_ERRORS, STAT_REJECTED_CONNECTIONS,
-    STARTUP_INSTANT, is_redis_error,
-};
-#[cfg(not(test))]
-use crate::meta::{
-    MetaCmd, MetaFlag, MetaParseResult, parse_meta_command,
-    has_flag, get_flag_token, write_meta_flag_echo,
-    validate_mg_flags, validate_ms_flags, validate_md_flags, validate_ma_flags,
-    validate_mn_flags, validate_me_flags,
-};
-#[cfg(not(test))]
-use redis_module::RedisValue;
-#[cfg(not(test))]
-use crate::protocol::MAX_BODY_LEN;
 
 /// ASCII connection handler — entered after protocol detection.
 /// `buf` already contains the first bytes read by `handle_conn`.
@@ -412,7 +537,11 @@ pub(crate) fn handle_ascii_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<
                         let byte_count = data_block_len(&ascii_cmd);
                         if byte_count > MAX_BODY_LEN {
                             let nr = is_noreply(&ascii_cmd);
-                            if !nr { out.extend_from_slice(b"CLIENT_ERROR object too large for cache\r\n"); }
+                            if !nr {
+                                out.extend_from_slice(
+                                    b"CLIENT_ERROR object too large for cache\r\n",
+                                );
+                            }
                             drain_data_block(sock, buf, byte_count)?;
                             flush_out(sock, &mut out)?;
                             continue;
@@ -421,7 +550,9 @@ pub(crate) fn handle_ascii_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<
                             Ok(d) => d,
                             Err(_) => {
                                 let nr = is_noreply(&ascii_cmd);
-                                if !nr { out.extend_from_slice(b"CLIENT_ERROR bad data chunk\r\n"); }
+                                if !nr {
+                                    out.extend_from_slice(b"CLIENT_ERROR bad data chunk\r\n");
+                                }
                                 flush_out(sock, &mut out)?;
                                 continue;
                             }
@@ -489,8 +620,12 @@ fn is_meta_command(line: &[u8]) -> bool {
         return false;
     }
     let prefix = &line[..2];
-    let is_meta_prefix = prefix == b"mg" || prefix == b"ms" || prefix == b"md"
-        || prefix == b"ma" || prefix == b"mn" || prefix == b"me";
+    let is_meta_prefix = prefix == b"mg"
+        || prefix == b"ms"
+        || prefix == b"md"
+        || prefix == b"ma"
+        || prefix == b"mn"
+        || prefix == b"me";
     if !is_meta_prefix {
         return false;
     }
@@ -500,7 +635,10 @@ fn is_meta_command(line: &[u8]) -> bool {
 
 /// Does this command need a data block after the command line?
 fn needs_data_block(cmd: &AsciiCmd<'_>) -> bool {
-    matches!(cmd, AsciiCmd::Store { .. } | AsciiCmd::Cas { .. } | AsciiCmd::AppendPrepend { .. })
+    matches!(
+        cmd,
+        AsciiCmd::Store { .. } | AsciiCmd::Cas { .. } | AsciiCmd::AppendPrepend { .. }
+    )
 }
 
 /// Get the data block length declared by the command.
@@ -531,7 +669,11 @@ fn is_noreply(cmd: &AsciiCmd<'_>) -> bool {
 /// Read exactly `byte_count` bytes of data plus trailing \r\n from
 /// the socket/buffer.  Returns the data bytes (without the \r\n).
 #[cfg(not(test))]
-fn read_data_block(sock: &mut TcpStream, buf: &mut BytesMut, byte_count: u32) -> Result<Vec<u8>, ()> {
+fn read_data_block(
+    sock: &mut TcpStream,
+    buf: &mut BytesMut,
+    byte_count: u32,
+) -> Result<Vec<u8>, ()> {
     let need = byte_count as usize + 2; // data + \r\n
     // Read until we have enough.
     while buf.len() < need {
@@ -545,8 +687,7 @@ fn read_data_block(sock: &mut TcpStream, buf: &mut BytesMut, byte_count: u32) ->
     let data = buf[..byte_count as usize].to_vec();
     // Validate trailing \r\n (or bare \n).
     let trail = &buf[byte_count as usize..byte_count as usize + 2];
-    let valid_terminator = trail == b"\r\n"
-        || (trail[0] == b'\n'); // bare \n + whatever follows
+    let valid_terminator = trail == b"\r\n" || (trail[0] == b'\n'); // bare \n + whatever follows
     if !valid_terminator {
         buf.advance(need);
         return Err(());
@@ -577,40 +718,70 @@ fn drain_data_block(sock: &mut TcpStream, buf: &mut BytesMut, byte_count: u32) -
 #[cfg(not(test))]
 fn dispatch_cmd(cmd: AsciiCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br<()> {
     match cmd {
-        AsciiCmd::Store { cmd, key, flags, exptime, noreply, .. } => {
-            ascii_store(cmd, key, flags, exptime, 0, data.unwrap_or(&[]), noreply, out)
-        }
-        AsciiCmd::Cas { key, flags, exptime, cas_unique, noreply, .. } => {
-            ascii_store(StoreOp::Set, key, flags, exptime, cas_unique, data.unwrap_or(&[]), noreply, out)
-        }
-        AsciiCmd::AppendPrepend { is_prepend, key, noreply, .. } => {
-            ascii_append_prepend(is_prepend, key, data.unwrap_or(&[]), noreply, out)
-        }
-        AsciiCmd::Retrieval { cmd, exptime, keys } => {
-            ascii_retrieval(cmd, exptime, &keys, out)
-        }
-        AsciiCmd::Delete { key, noreply } => {
-            ascii_delete(key, noreply, out)
-        }
-        AsciiCmd::Counter { is_decr, key, value, noreply } => {
-            ascii_counter(is_decr, key, value, noreply, out)
-        }
-        AsciiCmd::Touch { key, exptime, noreply } => {
-            ascii_touch(key, exptime, noreply, out)
-        }
-        AsciiCmd::FlushAll { noreply, .. } => {
-            ascii_flush(noreply, out)
-        }
+        AsciiCmd::Store {
+            cmd,
+            key,
+            flags,
+            exptime,
+            noreply,
+            ..
+        } => ascii_store(
+            cmd,
+            key,
+            flags,
+            exptime,
+            0,
+            data.unwrap_or(&[]),
+            noreply,
+            out,
+        ),
+        AsciiCmd::Cas {
+            key,
+            flags,
+            exptime,
+            cas_unique,
+            noreply,
+            ..
+        } => ascii_store(
+            StoreOp::Set,
+            key,
+            flags,
+            exptime,
+            cas_unique,
+            data.unwrap_or(&[]),
+            noreply,
+            out,
+        ),
+        AsciiCmd::AppendPrepend {
+            is_prepend,
+            key,
+            noreply,
+            ..
+        } => ascii_append_prepend(is_prepend, key, data.unwrap_or(&[]), noreply, out),
+        AsciiCmd::Retrieval { cmd, exptime, keys } => ascii_retrieval(cmd, exptime, &keys, out),
+        AsciiCmd::Delete { key, noreply } => ascii_delete(key, noreply, out),
+        AsciiCmd::Counter {
+            is_decr,
+            key,
+            value,
+            noreply,
+        } => ascii_counter(is_decr, key, value, noreply, out),
+        AsciiCmd::Touch {
+            key,
+            exptime,
+            noreply,
+        } => ascii_touch(key, exptime, noreply, out),
+        AsciiCmd::FlushAll { noreply, .. } => ascii_flush(noreply, out),
         AsciiCmd::Version => {
             out.extend_from_slice(VERSION_STRING.as_bytes());
             out.extend_from_slice(b"\r\n");
             Ok(())
         }
-        AsciiCmd::Stats { args } => {
-            ascii_stats(args, out)
-        }
+        AsciiCmd::Stats { args } => ascii_stats(args, out),
         AsciiCmd::Verbosity { noreply } => {
-            if !noreply { out.extend_from_slice(b"OK\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"OK\r\n");
+            }
             Ok(())
         }
         AsciiCmd::Quit => {
@@ -699,8 +870,14 @@ fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -
 #[cfg(not(test))]
 #[allow(clippy::too_many_arguments)]
 fn ascii_store(
-    op: StoreOp, key: &[u8], flags: u32, exptime: u32, cas: u64,
-    value: &[u8], noreply: bool, out: &mut Vec<u8>,
+    op: StoreOp,
+    key: &[u8],
+    flags: u32,
+    exptime: u32,
+    cas: u64,
+    value: &[u8],
+    noreply: bool,
+    out: &mut Vec<u8>,
 ) -> Br<()> {
     STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(key);
@@ -716,15 +893,22 @@ fn ascii_store(
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
             b"2",
-            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-            op_name.as_bytes(), value,
-            flags_str.as_bytes(), cas_str.as_bytes(), expiry_str.as_bytes(),
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            op_name.as_bytes(),
+            value,
+            flags_str.as_bytes(),
+            cas_str.as_bytes(),
+            expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
@@ -736,7 +920,9 @@ fn ascii_store(
             (st, cas_val)
         }
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
@@ -744,27 +930,43 @@ fn ascii_store(
     let is_cas_op = cas != 0;
     match status_code {
         0 => {
-            if is_cas_op { STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed); }
-            if !noreply { out.extend_from_slice(b"STORED\r\n"); }
+            if is_cas_op {
+                STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            if !noreply {
+                out.extend_from_slice(b"STORED\r\n");
+            }
         }
         -1 => {
             // NOT_FOUND (replace on missing, or CAS on missing)
-            if is_cas_op { STAT_CAS_MISSES.fetch_add(1, Ordering::Relaxed); }
+            if is_cas_op {
+                STAT_CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             if !noreply {
-                if is_cas_op { out.extend_from_slice(b"NOT_FOUND\r\n"); }
-                else { out.extend_from_slice(b"NOT_STORED\r\n"); }
+                if is_cas_op {
+                    out.extend_from_slice(b"NOT_FOUND\r\n");
+                } else {
+                    out.extend_from_slice(b"NOT_STORED\r\n");
+                }
             }
         }
         -2 => {
             // KEY_EXISTS (add on existing, or CAS mismatch)
-            if is_cas_op { STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed); }
+            if is_cas_op {
+                STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed);
+            }
             if !noreply {
-                if is_cas_op { out.extend_from_slice(b"EXISTS\r\n"); }
-                else { out.extend_from_slice(b"NOT_STORED\r\n"); }
+                if is_cas_op {
+                    out.extend_from_slice(b"EXISTS\r\n");
+                } else {
+                    out.extend_from_slice(b"NOT_STORED\r\n");
+                }
             }
         }
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
         }
     }
     Ok(())
@@ -773,14 +975,19 @@ fn ascii_store(
 /// Handle get/gets/gat/gats (multi-key retrieval).
 #[cfg(not(test))]
 fn ascii_retrieval(
-    cmd: RetrievalOp, exptime: Option<u32>, keys: &[&[u8]], out: &mut Vec<u8>,
+    cmd: RetrievalOp,
+    exptime: Option<u32>,
+    keys: &[&[u8]],
+    out: &mut Vec<u8>,
 ) -> Br<()> {
     let include_cas = matches!(cmd, RetrievalOp::Gets | RetrievalOp::Gats);
     let is_gat = matches!(cmd, RetrievalOp::Gat | RetrievalOp::Gats);
 
     for &key in keys {
         STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
-        if is_gat { STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed); }
+        if is_gat {
+            STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
+        }
 
         let rk = make_redis_key(key);
 
@@ -789,24 +996,32 @@ fn ascii_retrieval(
             with_ctx(|ctx| {
                 let keys_and_args: &[&[u8]] = &[
                     b"2",
-                    rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+                    rk.as_slice(),
+                    CAS_COUNTER_KEY.as_bytes(),
                     exp_str.as_bytes(),
                 ];
                 eval_lua(ctx, &SCRIPT_GAT, keys_and_args)
-            }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+            })
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?
         } else {
             with_ctx(|ctx| {
                 let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
                 eval_lua(ctx, &SCRIPT_GET, keys_and_args)
-            }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+            })
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?
         };
 
-        if is_redis_error(&reply) { continue; }
+        if is_redis_error(&reply) {
+            continue;
+        }
 
         let (status, hex_val, flags_str, cas_str) = match &reply {
-            RedisValue::Array(arr) if arr.len() >= 4 => {
-                (eval_int(&arr[0]), eval_str(&arr[1]), eval_str(&arr[2]), eval_str(&arr[3]))
-            }
+            RedisValue::Array(arr) if arr.len() >= 4 => (
+                eval_int(&arr[0]),
+                eval_str(&arr[1]),
+                eval_str(&arr[2]),
+                eval_str(&arr[3]),
+            ),
             _ => continue,
         };
 
@@ -842,12 +1057,13 @@ fn ascii_delete(key: &[u8], noreply: bool, out: &mut Vec<u8>) -> Br<()> {
     let rk = make_redis_key(key);
     // ASCII delete never uses CAS — always non-CAS path.
     // Use direct DEL for the fast non-CAS bypass.
-    let reply = with_ctx(|ctx| {
-        ctx.call("DEL", &[rk.as_slice()])
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    let reply = with_ctx(|ctx| ctx.call("DEL", &[rk.as_slice()]))
+        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
@@ -855,24 +1071,36 @@ fn ascii_delete(key: &[u8], noreply: bool, out: &mut Vec<u8>) -> Br<()> {
     let deleted_count = match &reply {
         RedisValue::Integer(n) => *n,
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
 
     if deleted_count > 0 {
         STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
-        if !noreply { out.extend_from_slice(b"DELETED\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"DELETED\r\n");
+        }
     } else {
         STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
-        if !noreply { out.extend_from_slice(b"NOT_FOUND\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"NOT_FOUND\r\n");
+        }
     }
     Ok(())
 }
 
 /// Handle incr/decr.
 #[cfg(not(test))]
-fn ascii_counter(is_decr: bool, key: &[u8], delta: u64, noreply: bool, out: &mut Vec<u8>) -> Br<()> {
+fn ascii_counter(
+    is_decr: bool,
+    key: &[u8],
+    delta: u64,
+    noreply: bool,
+    out: &mut Vec<u8>,
+) -> Br<()> {
     let rk = make_redis_key(key);
     let delta_str = delta.to_string();
     let is_decr_str = if is_decr { "1" } else { "0" };
@@ -884,15 +1112,21 @@ fn ascii_counter(is_decr: bool, key: &[u8], delta: u64, noreply: bool, out: &mut
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
             b"2",
-            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-            delta_str.as_bytes(), is_decr_str.as_bytes(),
-            initial_str.as_bytes(), expiry_str.as_bytes(),
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            delta_str.as_bytes(),
+            is_decr_str.as_bytes(),
+            initial_str.as_bytes(),
+            expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
@@ -901,33 +1135,47 @@ fn ascii_counter(is_decr: bool, key: &[u8], delta: u64, noreply: bool, out: &mut
             (eval_int(&arr[0]), eval_str(&arr[1]), eval_str(&arr[2]))
         }
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
 
     match status {
         0 => {
-            if is_decr { STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed); }
-            else { STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed); }
+            if is_decr {
+                STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed);
+            }
             if !noreply {
                 out.extend_from_slice(value_str.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }
         }
         -1 => {
-            if is_decr { STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed); }
-            else { STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed); }
-            if !noreply { out.extend_from_slice(b"NOT_FOUND\r\n"); }
+            if is_decr {
+                STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            if !noreply {
+                out.extend_from_slice(b"NOT_FOUND\r\n");
+            }
         }
         -3 => {
             // Non-numeric value.
             if !noreply {
-                out.extend_from_slice(b"CLIENT_ERROR cannot increment or decrement non-numeric value\r\n");
+                out.extend_from_slice(
+                    b"CLIENT_ERROR cannot increment or decrement non-numeric value\r\n",
+                );
             }
         }
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
         }
     }
     Ok(())
@@ -943,28 +1191,42 @@ fn ascii_touch(key: &[u8], exptime: u32, noreply: bool, out: &mut Vec<u8>) -> Br
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
             b"2",
-            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
             exp_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_TOUCH, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
     let status = match &reply {
         RedisValue::Array(arr) if !arr.is_empty() => eval_int(&arr[0]),
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
 
     match status {
-        0 => { if !noreply { out.extend_from_slice(b"TOUCHED\r\n"); } }
-        _ => { if !noreply { out.extend_from_slice(b"NOT_FOUND\r\n"); } }
+        0 => {
+            if !noreply {
+                out.extend_from_slice(b"TOUCHED\r\n");
+            }
+        }
+        _ => {
+            if !noreply {
+                out.extend_from_slice(b"NOT_FOUND\r\n");
+            }
+        }
     }
     Ok(())
 }
@@ -972,41 +1234,61 @@ fn ascii_touch(key: &[u8], exptime: u32, noreply: bool, out: &mut Vec<u8>) -> Br
 /// Handle append/prepend.
 #[cfg(not(test))]
 fn ascii_append_prepend(
-    is_prepend: bool, key: &[u8], value: &[u8], noreply: bool, out: &mut Vec<u8>,
+    is_prepend: bool,
+    key: &[u8],
+    value: &[u8],
+    noreply: bool,
+    out: &mut Vec<u8>,
 ) -> Br<()> {
     STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(key);
-    let script = if is_prepend { &SCRIPT_PREPEND } else { &SCRIPT_APPEND };
+    let script = if is_prepend {
+        &SCRIPT_PREPEND
+    } else {
+        &SCRIPT_APPEND
+    };
 
     let reply = with_ctx(|ctx| {
-        let keys_and_args: &[&[u8]] = &[
-            b"2",
-            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-            value, b"0",
-        ];
+        let keys_and_args: &[&[u8]] =
+            &[b"2", rk.as_slice(), CAS_COUNTER_KEY.as_bytes(), value, b"0"];
         eval_lua(ctx, script, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !noreply {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
     let status = match &reply {
         RedisValue::Array(arr) if !arr.is_empty() => eval_int(&arr[0]),
         _ => {
-            if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
 
     match status {
-        0 => { if !noreply { out.extend_from_slice(b"STORED\r\n"); } }
+        0 => {
+            if !noreply {
+                out.extend_from_slice(b"STORED\r\n");
+            }
+        }
         -5 => {
             // NOT_STORED — key does not exist.
-            if !noreply { out.extend_from_slice(b"NOT_STORED\r\n"); }
+            if !noreply {
+                out.extend_from_slice(b"NOT_STORED\r\n");
+            }
         }
-        _ => { if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); } }
+        _ => {
+            if !noreply {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
+        }
     }
     Ok(())
 }
@@ -1020,9 +1302,12 @@ fn ascii_flush(noreply: bool, out: &mut Vec<u8>) -> Br<()> {
     with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[b"0"];
         eval_lua(ctx, &SCRIPT_FLUSH, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
-    if !noreply { out.extend_from_slice(b"OK\r\n"); }
+    if !noreply {
+        out.extend_from_slice(b"OK\r\n");
+    }
     Ok(())
 }
 
@@ -1058,21 +1343,25 @@ fn meta_get(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
             // First touch to update TTL.
             let touch_keys_and_args: &[&[u8]] = &[
                 b"2",
-                rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+                rk.as_slice(),
+                CAS_COUNTER_KEY.as_bytes(),
                 exp_str.as_bytes(),
             ];
             eval_lua(ctx, &SCRIPT_TOUCH, touch_keys_and_args)
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        })
+        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
         // Then get with TTL info.
         with_ctx(|ctx| {
             let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
             eval_lua(ctx, &SCRIPT_META_GET, keys_and_args)
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+        })
+        .map_err(|e| BridgeErr::Redis(e.to_string()))?
     } else {
         with_ctx(|ctx| {
             let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
             eval_lua(ctx, &SCRIPT_META_GET, keys_and_args)
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+        })
+        .map_err(|e| BridgeErr::Redis(e.to_string()))?
     };
 
     if is_redis_error(&reply) {
@@ -1170,28 +1459,37 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
         "A" | "P" => {
             // Append/Prepend mode.
             let is_prepend = mode == "P";
-            let script = if is_prepend { &SCRIPT_PREPEND } else { &SCRIPT_APPEND };
+            let script = if is_prepend {
+                &SCRIPT_PREPEND
+            } else {
+                &SCRIPT_APPEND
+            };
             let rk = make_redis_key(key);
             let reply = with_ctx(|ctx| {
                 let keys_and_args: &[&[u8]] = &[
                     b"2",
-                    rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-                    data, cas.as_bytes(),
+                    rk.as_slice(),
+                    CAS_COUNTER_KEY.as_bytes(),
+                    data,
+                    cas.as_bytes(),
                 ];
                 eval_lua(ctx, script, keys_and_args)
-            }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+            })
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
             if is_redis_error(&reply) {
-                if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                if !quiet {
+                    out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                }
                 return Ok(());
             }
 
             let (status, cas_val) = match &reply {
-                RedisValue::Array(arr) if arr.len() >= 2 => {
-                    (eval_int(&arr[0]), eval_str(&arr[1]))
-                }
+                RedisValue::Array(arr) if arr.len() >= 2 => (eval_int(&arr[0]), eval_str(&arr[1])),
                 _ => {
-                    if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                    if !quiet {
+                        out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                    }
                     return Ok(());
                 }
             };
@@ -1241,24 +1539,31 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
             let reply = with_ctx(|ctx| {
                 let keys_and_args: &[&[u8]] = &[
                     b"2",
-                    rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-                    op_name.as_bytes(), data,
-                    flags_str.as_bytes(), cas_str.as_bytes(), expiry_str.as_bytes(),
+                    rk.as_slice(),
+                    CAS_COUNTER_KEY.as_bytes(),
+                    op_name.as_bytes(),
+                    data,
+                    flags_str.as_bytes(),
+                    cas_str.as_bytes(),
+                    expiry_str.as_bytes(),
                 ];
                 eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
-            }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+            })
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
             if is_redis_error(&reply) {
-                if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                if !quiet {
+                    out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                }
                 return Ok(());
             }
 
             let (status, new_cas) = match &reply {
-                RedisValue::Array(arr) if arr.len() >= 2 => {
-                    (eval_int(&arr[0]), eval_str(&arr[1]))
-                }
+                RedisValue::Array(arr) if arr.len() >= 2 => (eval_int(&arr[0]), eval_str(&arr[1])),
                 _ => {
-                    if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                    if !quiet {
+                        out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                    }
                     return Ok(());
                 }
             };
@@ -1301,7 +1606,9 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
         }
         _ => {
             // Unreachable: validate_ms_flags rejects unknown modes before dispatch.
-            if !quiet { out.extend_from_slice(b"CLIENT_ERROR unsupported ms mode\r\n"); }
+            if !quiet {
+                out.extend_from_slice(b"CLIENT_ERROR unsupported ms mode\r\n");
+            }
         }
     }
     Ok(())
@@ -1316,22 +1623,22 @@ fn meta_delete(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
 
     // Non-CAS DELETE bypass: when CAS is "0", use direct DEL instead of Lua.
     let (reply, is_direct_del) = if cas == "0" {
-        let r = with_ctx(|ctx| {
-            ctx.call("DEL", &[rk.as_slice()])
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        let r = with_ctx(|ctx| ctx.call("DEL", &[rk.as_slice()]))
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?;
         (r, true)
     } else {
         let r = with_ctx(|ctx| {
-            let keys_and_args: &[&[u8]] = &[
-                b"1", rk.as_slice(), cas.as_bytes(),
-            ];
+            let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice(), cas.as_bytes()];
             eval_lua(ctx, &SCRIPT_DELETE, keys_and_args)
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        })
+        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
         (r, false)
     };
 
     if is_redis_error(&reply) {
-        if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !quiet {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
@@ -1347,7 +1654,9 @@ fn meta_delete(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
             }
         }
         _ => {
-            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !quiet {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
@@ -1378,7 +1687,9 @@ fn meta_delete(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
             }
         }
         _ => {
-            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !quiet {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
         }
     }
     Ok(())
@@ -1402,15 +1713,21 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
             b"2",
-            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
-            delta_str.as_bytes(), is_decr_str.as_bytes(),
-            initial.as_bytes(), expiry.as_bytes(),
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            delta_str.as_bytes(),
+            is_decr_str.as_bytes(),
+            initial.as_bytes(),
+            expiry.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        if !quiet {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        }
         return Ok(());
     }
 
@@ -1422,17 +1739,25 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
             (st, val, cas_s)
         }
         _ => {
-            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !quiet {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
             return Ok(());
         }
     };
 
     if is_decr {
-        if status == 0 { STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed); }
-        else { STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed); }
+        if status == 0 {
+            STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
     } else {
-        if status == 0 { STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed); }
-        else { STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed); }
+        if status == 0 {
+            STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     match status {
@@ -1469,11 +1794,15 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
         -3 => {
             // NON_NUMERIC — value is not a number.
             if !quiet {
-                out.extend_from_slice(b"CLIENT_ERROR cannot increment or decrement non-numeric value\r\n");
+                out.extend_from_slice(
+                    b"CLIENT_ERROR cannot increment or decrement non-numeric value\r\n",
+                );
             }
         }
         _ => {
-            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            if !quiet {
+                out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            }
         }
     }
     Ok(())
@@ -1502,31 +1831,92 @@ fn ascii_stats(args: Option<&str>, out: &mut Vec<u8>) -> Br<()> {
             let stats: Vec<(&str, String)> = vec![
                 ("pid", pid.to_string()),
                 ("uptime", uptime.to_string()),
-                ("time", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs()).unwrap_or(0).to_string()),
+                (
+                    "time",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                        .to_string(),
+                ),
                 ("version", "RedCouch 0.1.0".to_string()),
                 ("curr_items", curr_items.to_string()),
-                ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                (
+                    "curr_connections",
+                    STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "total_connections",
+                    STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string(),
+                ),
                 ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
                 ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
-                ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
-                ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
-                ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
-                ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
-                ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
-                ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
-                ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
-                ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
-                ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
-                ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
-                ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
-                ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
-                ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                (
+                    "cmd_flush",
+                    STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "cmd_touch",
+                    STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "get_hits",
+                    STAT_GET_HITS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "get_misses",
+                    STAT_GET_MISSES.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "delete_hits",
+                    STAT_DELETE_HITS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "delete_misses",
+                    STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "incr_hits",
+                    STAT_INCR_HITS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "incr_misses",
+                    STAT_INCR_MISSES.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "decr_hits",
+                    STAT_DECR_HITS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "decr_misses",
+                    STAT_DECR_MISSES.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "cas_hits",
+                    STAT_CAS_HITS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "cas_misses",
+                    STAT_CAS_MISSES.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "cas_badval",
+                    STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "auth_cmds",
+                    STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "auth_errors",
+                    STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string(),
+                ),
+                (
+                    "rejected_connections",
+                    STAT_REJECTED_CONNECTIONS
+                        .load(Ordering::Relaxed)
+                        .to_string(),
+                ),
                 ("max_connections", MAX_CONNECTIONS.to_string()),
             ];
 
@@ -1622,7 +2012,14 @@ mod tests {
     #[test]
     fn parse_set_basic() {
         match parse_command_line(b"set mykey 0 60 5") {
-            CmdParseResult::Ok(AsciiCmd::Store { cmd, key, flags, exptime, bytes, noreply }) => {
+            CmdParseResult::Ok(AsciiCmd::Store {
+                cmd,
+                key,
+                flags,
+                exptime,
+                bytes,
+                noreply,
+            }) => {
                 assert_eq!(cmd, StoreOp::Set);
                 assert_eq!(key, b"mykey");
                 assert_eq!(flags, 0);
@@ -1645,7 +2042,9 @@ mod tests {
     #[test]
     fn parse_add() {
         match parse_command_line(b"add k 0 0 1") {
-            CmdParseResult::Ok(AsciiCmd::Store { cmd: StoreOp::Add, .. }) => {}
+            CmdParseResult::Ok(AsciiCmd::Store {
+                cmd: StoreOp::Add, ..
+            }) => {}
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1653,7 +2052,10 @@ mod tests {
     #[test]
     fn parse_replace() {
         match parse_command_line(b"replace k 0 0 1") {
-            CmdParseResult::Ok(AsciiCmd::Store { cmd: StoreOp::Replace, .. }) => {}
+            CmdParseResult::Ok(AsciiCmd::Store {
+                cmd: StoreOp::Replace,
+                ..
+            }) => {}
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1663,7 +2065,12 @@ mod tests {
     #[test]
     fn parse_cas_basic() {
         match parse_command_line(b"cas k 0 0 5 12345") {
-            CmdParseResult::Ok(AsciiCmd::Cas { key, cas_unique, noreply, .. }) => {
+            CmdParseResult::Ok(AsciiCmd::Cas {
+                key,
+                cas_unique,
+                noreply,
+                ..
+            }) => {
                 assert_eq!(key, b"k");
                 assert_eq!(cas_unique, 12345);
                 assert!(!noreply);
@@ -1685,7 +2092,12 @@ mod tests {
     #[test]
     fn parse_append() {
         match parse_command_line(b"append k 5") {
-            CmdParseResult::Ok(AsciiCmd::AppendPrepend { is_prepend, key, bytes, noreply }) => {
+            CmdParseResult::Ok(AsciiCmd::AppendPrepend {
+                is_prepend,
+                key,
+                bytes,
+                noreply,
+            }) => {
                 assert!(!is_prepend);
                 assert_eq!(key, b"k");
                 assert_eq!(bytes, 5);
@@ -1698,7 +2110,11 @@ mod tests {
     #[test]
     fn parse_prepend_noreply() {
         match parse_command_line(b"prepend k 3 noreply") {
-            CmdParseResult::Ok(AsciiCmd::AppendPrepend { is_prepend, noreply, .. }) => {
+            CmdParseResult::Ok(AsciiCmd::AppendPrepend {
+                is_prepend,
+                noreply,
+                ..
+            }) => {
                 assert!(is_prepend);
                 assert!(noreply);
             }
@@ -1733,7 +2149,10 @@ mod tests {
     #[test]
     fn parse_gets() {
         match parse_command_line(b"gets k") {
-            CmdParseResult::Ok(AsciiCmd::Retrieval { cmd: RetrievalOp::Gets, .. }) => {}
+            CmdParseResult::Ok(AsciiCmd::Retrieval {
+                cmd: RetrievalOp::Gets,
+                ..
+            }) => {}
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1753,7 +2172,10 @@ mod tests {
     #[test]
     fn parse_gats() {
         match parse_command_line(b"gats 0 k") {
-            CmdParseResult::Ok(AsciiCmd::Retrieval { cmd: RetrievalOp::Gats, .. }) => {}
+            CmdParseResult::Ok(AsciiCmd::Retrieval {
+                cmd: RetrievalOp::Gats,
+                ..
+            }) => {}
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1782,7 +2204,12 @@ mod tests {
     #[test]
     fn parse_incr() {
         match parse_command_line(b"incr counter 5") {
-            CmdParseResult::Ok(AsciiCmd::Counter { is_decr, key, value, noreply }) => {
+            CmdParseResult::Ok(AsciiCmd::Counter {
+                is_decr,
+                key,
+                value,
+                noreply,
+            }) => {
                 assert!(!is_decr);
                 assert_eq!(key, b"counter");
                 assert_eq!(value, 5);
@@ -1795,7 +2222,9 @@ mod tests {
     #[test]
     fn parse_decr_noreply() {
         match parse_command_line(b"decr c 10 noreply") {
-            CmdParseResult::Ok(AsciiCmd::Counter { is_decr, noreply, .. }) => {
+            CmdParseResult::Ok(AsciiCmd::Counter {
+                is_decr, noreply, ..
+            }) => {
                 assert!(is_decr);
                 assert!(noreply);
             }
@@ -1806,7 +2235,11 @@ mod tests {
     #[test]
     fn parse_touch() {
         match parse_command_line(b"touch k 300") {
-            CmdParseResult::Ok(AsciiCmd::Touch { key, exptime, noreply }) => {
+            CmdParseResult::Ok(AsciiCmd::Touch {
+                key,
+                exptime,
+                noreply,
+            }) => {
                 assert_eq!(key, b"k");
                 assert_eq!(exptime, 300);
                 assert!(!noreply);
@@ -1841,7 +2274,10 @@ mod tests {
 
     #[test]
     fn parse_version() {
-        assert!(matches!(parse_command_line(b"version"), CmdParseResult::Ok(AsciiCmd::Version)));
+        assert!(matches!(
+            parse_command_line(b"version"),
+            CmdParseResult::Ok(AsciiCmd::Version)
+        ));
     }
 
     #[test]
@@ -1872,44 +2308,68 @@ mod tests {
 
     #[test]
     fn parse_quit() {
-        assert!(matches!(parse_command_line(b"quit"), CmdParseResult::Ok(AsciiCmd::Quit)));
+        assert!(matches!(
+            parse_command_line(b"quit"),
+            CmdParseResult::Ok(AsciiCmd::Quit)
+        ));
     }
 
     // ── parse_command_line: error cases ─────────────────────────────
 
     #[test]
     fn parse_unknown_command() {
-        assert!(matches!(parse_command_line(b"foobar key"), CmdParseResult::UnknownCommand));
+        assert!(matches!(
+            parse_command_line(b"foobar key"),
+            CmdParseResult::UnknownCommand
+        ));
     }
 
     #[test]
     fn parse_set_missing_args() {
-        assert!(matches!(parse_command_line(b"set k 0"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"set k 0"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     #[test]
     fn parse_set_bad_flags() {
-        assert!(matches!(parse_command_line(b"set k notanum 0 5"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"set k notanum 0 5"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     #[test]
     fn parse_get_no_keys() {
-        assert!(matches!(parse_command_line(b"get"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"get"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     #[test]
     fn parse_incr_bad_value() {
-        assert!(matches!(parse_command_line(b"incr k -5"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"incr k -5"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     #[test]
     fn parse_set_bad_noreply_token() {
-        assert!(matches!(parse_command_line(b"set k 0 0 5 garbage"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"set k 0 0 5 garbage"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     #[test]
     fn parse_delete_bad_extra() {
-        assert!(matches!(parse_command_line(b"delete k extra"), CmdParseResult::ClientError(_)));
+        assert!(matches!(
+            parse_command_line(b"delete k extra"),
+            CmdParseResult::ClientError(_)
+        ));
     }
 
     // ── needs_data_block / data_block_len / is_noreply ─────────────
@@ -1917,7 +2377,12 @@ mod tests {
     #[test]
     fn data_block_for_store() {
         let cmd = AsciiCmd::Store {
-            cmd: StoreOp::Set, key: b"k", flags: 0, exptime: 0, bytes: 10, noreply: false,
+            cmd: StoreOp::Set,
+            key: b"k",
+            flags: 0,
+            exptime: 0,
+            bytes: 10,
+            noreply: false,
         };
         assert!(needs_data_block(&cmd));
         assert_eq!(data_block_len(&cmd), 10);
@@ -1927,7 +2392,9 @@ mod tests {
     #[test]
     fn no_data_block_for_get() {
         let cmd = AsciiCmd::Retrieval {
-            cmd: RetrievalOp::Get, exptime: None, keys: vec![b"k"],
+            cmd: RetrievalOp::Get,
+            exptime: None,
+            keys: vec![b"k"],
         };
         assert!(!needs_data_block(&cmd));
     }
