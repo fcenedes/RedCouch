@@ -1,159 +1,463 @@
-//! cbbridge – Redis module that lets Couchbase / Memcached
-//!            binary-protocol clients talk to RedisJSON.
+//! RedCouch – Redis module that bridges Couchbase / Memcached
+//!            binary-protocol clients to Redis using a hash-per-item
+//!            data model.
 //!
 //! Build :  cargo build --release
-//! Run   :  redis-stack-server --loadmodule ./target/release/libcbbridge.so
+//! Run   :  redis-server --loadmodule ./target/release/libred_couch.dylib
 
 #![forbid(unsafe_code)]
 #![allow(clippy::needless_return)]
 
+pub mod protocol;
+
+#[cfg(not(test))]
 use byteorder::{BigEndian, ByteOrder};
+#[cfg(not(test))]
 use bytes::{Buf, BytesMut};
-use redis_module::{DetachedFromClient, redis_module, Context, RedisString, Status, ThreadSafeContext, RedisValue, RedisError};
+#[cfg(not(test))]
+use protocol::{
+    Opcode, Request, try_parse_request, ParseResult,
+    write_response, write_simple_response, write_error_for_raw_opcode,
+    ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK,
+    CAS_ZERO, MAX_BODY_LEN,
+};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(test))]
+use std::time::Instant;
+#[cfg(not(test))]
 use std::{
-    convert::TryInto,
-    io::{Read, Write},
+    io::Read,
     net::{TcpListener, TcpStream},
     sync::Once,
     thread,
     time::Duration,
 };
 
-/* ============================================================
-   1.  Binary-protocol constants
-   ========================================================= */
-
-const MAGIC_REQ: u8 = 0x80;
-const MAGIC_RES: u8 = 0x81;
-
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum Opcode {
-    Get = 0x00,
-    GetQ = 0x09,
-    GetK = 0x0c,
-    GetKQ = 0x0d,
-    Set = 0x01,
-    Add = 0x02,
-    Replace = 0x03,
-    Delete = 0x04,
-    Increment = 0x05,
-    Decrement = 0x06,
-    Quit = 0x07,
-    Noop = 0x0a,
-}
-impl Opcode {
-    fn parse(b: u8) -> Option<Self> {
-        use Opcode::*;
-        Some(match b {
-            0x00 => Get,
-            0x09 => GetQ,
-            0x0c => GetK,
-            0x0d => GetKQ,
-            0x01 => Set,
-            0x02 => Add,
-            0x03 => Replace,
-            0x04 => Delete,
-            0x05 => Increment,
-            0x06 => Decrement,
-            0x07 => Quit,
-            0x0a => Noop,
-            _ => return None,
-        })
-    }
-}
-
-/* status codes we emit */
-const ST_OK: u16 = 0x0000;
-const ST_NF: u16 = 0x0001;
-const ST_IX: u16 = 0x0002;
-const ST_ARGS: u16 = 0x0004;
-const ST_UNK: u16 = 0x0081;
+// Redis-module imports are only needed when building the actual module,
+// not during `cargo test`.
+#[cfg(not(test))]
+use redis_module::{
+    DetachedFromClient, redis_module, Context, RedisString,
+    RedisValue, Status, ThreadSafeContext,
+};
 
 /* ============================================================
-   2.  Header + request parsing helpers
+   Key namespace and system keys
    ========================================================= */
 
-#[derive(Debug)]
-struct Header {
-    opcode: Opcode,
-    key_len: u16,
-    extras_len: u8,
-    body_len: u32,
-    opaque: u32,
+/// Prefix for user item keys in Redis.  Client key `foo` maps to
+/// Redis key `rc:foo`.
+#[cfg(not(test))]
+const KEY_PREFIX: &[u8] = b"rc:";
+
+/// Redis key for the monotonic CAS counter.
+#[cfg(not(test))]
+const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
+
+/* ============================================================
+   Runtime stats counters
+   ========================================================= */
+
+#[cfg(not(test))]
+static STAT_CMD_GET: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_SET: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_FLUSH: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_TOUCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_GET_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_GET_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DELETE_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DELETE_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_INCR_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_INCR_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DECR_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DECR_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_BADVAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CURR_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_TOTAL_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_AUTH_CMDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_AUTH_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Module startup time — set in `module_init`.
+#[cfg(not(test))]
+static STARTUP_INSTANT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Build the namespaced Redis key for a client key.
+#[cfg(not(test))]
+fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
+    let mut rk = Vec::with_capacity(KEY_PREFIX.len() + client_key.len());
+    rk.extend_from_slice(KEY_PREFIX);
+    rk.extend_from_slice(client_key);
+    rk
 }
-impl Header {
-    fn parse(buf: &[u8]) -> Option<Self> {
-        if buf.len() < 24 || buf[0] != MAGIC_REQ {
-            return None;
-        }
-        Some(Self {
-            opcode: Opcode::parse(buf[1])?,
-            key_len: BigEndian::read_u16(&buf[2..4]),
-            extras_len: buf[4],
-            body_len: BigEndian::read_u32(&buf[8..12]),
-            opaque: BigEndian::read_u32(&buf[12..16]),
-        })
+
+/// Decode a hex string (pairs of hex digits) into raw bytes.
+/// Returns an empty Vec if the input is not valid hex.
+#[cfg(not(test))]
+fn hex_decode(hex: &str) -> Vec<u8> {
+    if hex.len() % 2 != 0 {
+        return Vec::new();
     }
-}
-
-struct Request<'a> {
-    hdr: Header,
-    extras: &'a [u8],
-    key: &'a [u8],
-    value: &'a [u8],
-}
-
-fn parse_req(buf: &[u8]) -> Option<(Request<'_>, usize)> {
-    let hdr = Header::parse(buf)?;
-    let total = 24 + hdr.body_len as usize;
-    if buf.len() < total {
-        return None;
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = match bytes[i] {
+            b'0'..=b'9' => bytes[i] - b'0',
+            b'a'..=b'f' => bytes[i] - b'a' + 10,
+            b'A'..=b'F' => bytes[i] - b'A' + 10,
+            _ => return Vec::new(),
+        };
+        let lo = match bytes[i + 1] {
+            b'0'..=b'9' => bytes[i + 1] - b'0',
+            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+            _ => return Vec::new(),
+        };
+        out.push((hi << 4) | lo);
     }
-
-    let extras_end = 24 + hdr.extras_len as usize;
-    let key_end = extras_end + hdr.key_len as usize;
-
-    Some((
-        Request {
-            hdr,
-            extras: &buf[24..extras_end],
-            key: &buf[extras_end..key_end],
-            value: &buf[key_end..total],
-        },
-        total,
-    ))
+    out
 }
 
 /* ============================================================
-   3.  TCP listener (started once from module_init)
+   Lua scripts for atomic operations
    ========================================================= */
 
+/// Lua script for SET/ADD/REPLACE with atomic CAS check.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = op ("set"|"add"|"replace")
+/// ARGV[2] = value bytes
+/// ARGV[3] = flags (decimal string)
+/// ARGV[4] = request CAS (decimal string, "0" = skip check)
+/// ARGV[5] = expiry (decimal string)
+///
+/// Returns: {status, new_cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS
+#[cfg(not(test))]
+const LUA_STORE: &str = r#"
+local op = ARGV[1]
+local exists = redis.call('EXISTS', KEYS[1])
+if op == 'add' and exists == 1 then return {-2, ''} end
+if op == 'replace' and exists == 0 then return {-1, ''} end
+local req_cas = ARGV[4]
+if req_cas ~= '0' then
+  if exists == 0 then return {-1, ''} end
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', ARGV[2], 'f', ARGV[3], 'c', tostring(new_cas))
+local exp = tonumber(ARGV[5])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 and exists == 1 then
+  redis.call('PERSIST', KEYS[1])
+end
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for GET — returns value as hex-encoded string to avoid
+/// redis-module UTF-8 conversion panics on binary payloads.
+///
+/// KEYS[1] = item key
+///
+/// Returns: {status, hex_value, flags_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+///   hex_value: value bytes encoded as lowercase hex pairs
+#[cfg(not(test))]
+const LUA_GET: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
+local v = redis.call('HGET', KEYS[1], 'v')
+local f = redis.call('HGET', KEYS[1], 'f')
+local c = redis.call('HGET', KEYS[1], 'c')
+if v == false then v = '' end
+if f == false then f = '0' end
+if c == false then c = '0' end
+local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
+return {0, hex, f, c}
+"#;
+
+/// Lua script for DELETE with CAS check.
+///
+/// KEYS[1] = item key
+/// ARGV[1] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_DELETE: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local req_cas = ARGV[1]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return -2 end
+end
+redis.call('DEL', KEYS[1])
+return 0
+"#;
+
+/// Lua script for INCR/DECR with u64 semantics.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = delta (decimal string)
+/// ARGV[2] = is_decrement ("0"|"1")
+/// ARGV[3] = initial value (decimal string)
+/// ARGV[4] = expiry (decimal string)
+///
+/// Precision note: Lua 5.1 (embedded in Redis) uses IEEE 754 double-precision
+/// floats, so integers above 2^53 (9007199254740992) lose precision.  Counter
+/// values within [0, 2^53) are exact.  Values at or above 2^53 may round;
+/// the module does NOT attempt string-based big-integer math in Lua because
+/// the performance and complexity tradeoffs are not justified for GA.
+/// Overflow past the Lua precision boundary wraps modulo the double
+/// representation.  Underflow on DECR clamps to 0.
+///
+/// Returns: {status, value_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -3=NON_NUMERIC
+#[cfg(not(test))]
+const LUA_COUNTER: &str = r#"
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 0 then
+  local exp = tonumber(ARGV[4])
+  if exp == 4294967295 then return {-1, '', ''} end
+  local new_cas = redis.call('INCR', KEYS[2])
+  local init = ARGV[3]
+  redis.call('HSET', KEYS[1], 'v', init, 'f', '0', 'c', tostring(new_cas))
+  if exp ~= nil and exp > 0 then
+    if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+    else redis.call('EXPIREAT', KEYS[1], exp) end
+  end
+  return {0, init, tostring(new_cas)}
+end
+local val = redis.call('HGET', KEYS[1], 'v')
+local num = tonumber(val)
+if num == nil then return {-3, '', ''} end
+local delta = tonumber(ARGV[1])
+if ARGV[2] == '1' then
+  if num < delta then num = 0 else num = num - delta end
+else
+  num = num + delta
+end
+if num < 0 then num = 0 end
+local str_val = string.format('%.0f', num)
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', str_val, 'c', tostring(new_cas))
+return {0, str_val, tostring(new_cas)}
+"#;
+
+/// Lua script for TOUCH — update expiry on an existing key.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = expiry (decimal string)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+#[cfg(not(test))]
+const LUA_TOUCH: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, ''} end
+local exp = tonumber(ARGV[1])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 then
+  redis.call('PERSIST', KEYS[1])
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for GAT (Get And Touch) — fetch value and update expiry atomically.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = expiry (decimal string)
+///
+/// Returns: {status, hex_value, flags_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+#[cfg(not(test))]
+const LUA_GAT: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
+local exp = tonumber(ARGV[1])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 then
+  redis.call('PERSIST', KEYS[1])
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'c', tostring(new_cas))
+local v = redis.call('HGET', KEYS[1], 'v')
+local f = redis.call('HGET', KEYS[1], 'f')
+if v == false then v = '' end
+if f == false then f = '0' end
+local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
+return {0, hex, f, tostring(new_cas)}
+"#;
+
+/// Lua script for APPEND — append data to existing value.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = data to append
+/// ARGV[2] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_APPEND: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
+local req_cas = ARGV[2]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local old_v = redis.call('HGET', KEYS[1], 'v')
+if old_v == false then old_v = '' end
+local new_v = old_v .. ARGV[1]
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', new_v, 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for PREPEND — prepend data to existing value.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = data to prepend
+/// ARGV[2] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_PREPEND: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
+local req_cas = ARGV[2]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local old_v = redis.call('HGET', KEYS[1], 'v')
+if old_v == false then old_v = '' end
+local new_v = ARGV[1] .. old_v
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', new_v, 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
+
+/* ============================================================
+   TCP listener (started once from module_init)
+   ========================================================= */
+
+/// Default bind address — loopback only to avoid accidental public
+/// exposure.  Override via module args if needed in future.
+#[cfg(not(test))]
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:11210";
+
+/// Maximum number of concurrent client connections.  Beyond this limit
+/// new connections are accepted and immediately closed with an error log.
+#[cfg(not(test))]
+const MAX_CONNECTIONS: u64 = 1024;
+
+/// Socket read timeout — how long a connection can be idle before being
+/// closed.  30 seconds is generous for interactive memcached workloads.
+#[cfg(not(test))]
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Socket write timeout — prevents a stuck client from blocking a thread.
+#[cfg(not(test))]
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum read buffer size per connection.  If the buffer grows beyond
+/// this without producing a complete frame, the connection is closed.
+/// This prevents a slow-drip attack from consuming unbounded memory.
+#[cfg(not(test))]
+const MAX_READ_BUF: usize = (MAX_BODY_LEN as usize) + protocol::HEADER_LEN + 4096;
+
+/// Connection rejection counter.
+#[cfg(not(test))]
+static STAT_REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(not(test))]
 static LISTENER: Once = Once::new();
 
+#[cfg(not(test))]
 fn spawn_listener() {
     thread::spawn(|| {
-        let listener =
-            TcpListener::bind("0.0.0.0:11210").expect("bind :11210 (binary protocol)");
-        listener.set_nonblocking(true).ok();
-        eprintln!("[cbbridge] listening on 11210");
+        let listener = match TcpListener::bind(DEFAULT_BIND_ADDR) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "[redcouch] FATAL: cannot bind {DEFAULT_BIND_ADDR}: {e}  \
+                     (is another instance already running?)"
+                );
+                return;
+            }
+        };
+        // Use blocking accept — avoids busy-wait polling.
+        listener.set_nonblocking(false).ok();
+        eprintln!("[redcouch] listening on {DEFAULT_BIND_ADDR} (max_connections={MAX_CONNECTIONS})");
 
         for stream in listener.incoming() {
             match stream {
                 Ok(mut sock) => {
+                    // Enforce connection limit.
+                    let current = STAT_CURR_CONNECTIONS.load(Ordering::Relaxed);
+                    if current >= MAX_CONNECTIONS {
+                        STAT_REJECTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[redcouch] connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                        // Drop the socket immediately — client sees connection reset.
+                        drop(sock);
+                        continue;
+                    }
+
                     sock.set_nodelay(true).ok();
+                    sock.set_read_timeout(Some(SOCKET_READ_TIMEOUT)).ok();
+                    sock.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT)).ok();
+                    STAT_TOTAL_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                    STAT_CURR_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                     thread::spawn(move || {
                         if let Err(e) = handle_conn(&mut sock) {
-                            eprintln!("[cbbridge] connection error: {e}");
+                            // Don't log read timeouts as errors — they are expected
+                            // for idle connections.
+                            if let BridgeErr::Io(ref io_err) = e {
+                                if io_err.kind() == std::io::ErrorKind::WouldBlock
+                                    || io_err.kind() == std::io::ErrorKind::TimedOut
+                                {
+                                    // Normal idle timeout, suppress log.
+                                } else {
+                                    eprintln!("[redcouch] connection error: {e}");
+                                }
+                            } else {
+                                eprintln!("[redcouch] connection error: {e}");
+                            }
                         }
+                        STAT_CURR_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(20));
-                }
                 Err(e) => {
-                    eprintln!("[cbbridge] accept error: {e}");
-                    break;
+                    eprintln!("[redcouch] accept error: {e}");
+                    // Transient accept errors (e.g. fd exhaustion) — sleep
+                    // briefly and retry rather than killing the listener.
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -161,273 +465,932 @@ fn spawn_listener() {
 }
 
 /* ============================================================
-   4.  Connection state machine
+   Connection state machine
    ========================================================= */
 
+#[cfg(not(test))]
 #[derive(thiserror::Error, Debug)]
 enum BridgeErr {
     #[error("io {0}")]
     Io(#[from] std::io::Error),
-    #[error("utf8")]
-    Utf8(#[from] std::str::Utf8Error),
     #[error("redis {0}")]
     Redis(String),
 }
+#[cfg(not(test))]
 type Br<T> = Result<T, BridgeErr>;
 
+#[cfg(not(test))]
 fn handle_conn(sock: &mut TcpStream) -> Br<()> {
-    let mut buf = BytesMut::with_capacity(4096);
+    let mut buf = BytesMut::with_capacity(16384);
+    // Response write buffer — all responses for a batch of parsed requests
+    // are collected here and flushed in a single write_all() call, reducing
+    // the number of syscalls from O(responses * 4) to O(1) per read cycle.
+    let mut out = Vec::with_capacity(8192);
 
     loop {
-        let mut tmp = [0u8; 4096];
+        // Guard against unbounded buffer growth.
+        if buf.len() > MAX_READ_BUF {
+            eprintln!("[redcouch] read buffer exceeded {MAX_READ_BUF} bytes, closing connection");
+            return Ok(());
+        }
+
+        let mut tmp = [0u8; 16384];
         match sock.read(&mut tmp) {
-            Ok(0) => return Ok(()), // EOF
+            Ok(0) => return Ok(()),
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Socket read timeout — close the idle connection.
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+            }
             Err(e) => return Err(e.into()),
         }
 
-        while let Some((req, used)) = parse_req(&buf) {
-            handle(req, sock)?;
-            buf.advance(used);
+        loop {
+            match try_parse_request(&buf) {
+                ParseResult::Ok((req, used)) => {
+                    handle(req, &mut out)?;
+                    buf.advance(used);
+                }
+                ParseResult::Incomplete => break,
+                ParseResult::BadMagic => {
+                    eprintln!("[redcouch] bad magic byte, closing connection");
+                    return Ok(());
+                }
+                ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
+                    eprintln!("[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
+                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
+                    buf.advance(bytes_to_skip);
+                }
+                ParseResult::OversizedFrame { opaque, opcode_byte } => {
+                    eprintln!("[redcouch] oversized frame (opcode 0x{opcode_byte:02x}), closing connection");
+                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Frame too large")?;
+                    // Flush the error response before closing.
+                    if !out.is_empty() {
+                        use std::io::Write;
+                        sock.write_all(&out)?;
+                        out.clear();
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        // Flush all batched responses in a single write_all() call.
+        if !out.is_empty() {
+            use std::io::Write;
+            sock.write_all(&out)?;
+            out.clear();
         }
     }
 }
 
 /* ============================================================
-   5.  Command handlers
+   Command handlers
    ========================================================= */
 
-fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+#[cfg(not(test))]
+fn handle(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = match req.hdr.opcode {
+        Some(op) => op,
+        None => {
+            // Unknown opcode — respond with ST_UNK and continue.
+            write_error_for_raw_opcode(
+                out,
+                req.hdr.opcode_byte,
+                ST_UNK,
+                req.hdr.opaque,
+                b"Unknown command",
+            )?;
+            return Ok(());
+        }
+    };
+
     use Opcode::*;
-    match req.hdr.opcode {
-        Get | GetK | GetQ | GetKQ => op_get(req, sock),
-        Set | Add | Replace => op_store(req, sock),
-        Delete => op_delete(req, sock),
-        Increment | Decrement => op_counter(req, sock),
-        Noop => send_simple(sock, &req, ST_OK, &[]),
+    match opcode.base() {
+        Get | GetK => op_get(req, out),
+        Set | Add | Replace => op_store(req, out),
+        Delete => op_delete(req, out),
+        Increment | Decrement => op_counter(req, out),
+        Touch => op_touch(req, out),
+        GAT => op_gat(req, out),
+        Append | Prepend => op_append_prepend(req, out),
+        Flush => op_flush(req, out),
+        Version => op_version(req, out),
+        Stat => op_stat(req, out),
+        Verbosity => op_verbosity(req, out),
+        SaslListMechs => op_sasl_list_mechs(req, out),
+        SaslAuth => op_sasl_auth(req, out),
+        SaslStep => op_sasl_step(req, out),
+        Noop => {
+            write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+            Ok(())
+        }
         Quit => {
-            send_simple(sock, &req, ST_OK, &[])?;
+            if !opcode.is_quiet() {
+                write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+            }
             Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into())
+        }
+        // base() maps all quiet variants to their loud base, so the
+        // remaining arms are unreachable.
+        _ => {
+            write_error_for_raw_opcode(
+                out, req.hdr.opcode_byte, ST_UNK, req.hdr.opaque,
+                b"Unknown command",
+            )?;
+            Ok(())
         }
     }
 }
 
 /* ------------ helpers to run a Redis command -------------- */
-fn with_ctx<T>(f: impl Fn(&Context) -> T) -> T {
+#[cfg(not(test))]
+fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
     let tsc = ThreadSafeContext::<DetachedFromClient>::new();
     let guard = tsc.lock();
     f(&guard)
 }
 
-/* ------------ GET ------------ */
-/* ------------ GET / GETQ / GETK / GETKQ ------------ */
-fn op_get(
-    req: Request<'_>,
-    sock: &mut TcpStream,
-) -> Br<()> {
-    use Opcode::*;
-    let key = std::str::from_utf8(req.key)?;
-    let reply = with_ctx(|ctx| ctx.call("JSON.GET", &[key]))
-        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
+/// Helper to check if a RedisValue represents an error (including the
+/// `Ok(RedisValue::StaticError(...))` pattern from redis-module 2.0.7
+/// when `RedisModule_Call` returns NULL).
+#[cfg(not(test))]
+fn is_redis_error(v: &RedisValue) -> bool {
+    matches!(v, RedisValue::StaticError(_))
+}
 
-    // -----------------------------------------------------------------
-    // 1.  Handle cache-miss + “quiet” variants
-    // -----------------------------------------------------------------
-    let is_quiet = matches!(req.hdr.opcode, GetQ | GetKQ);
-    if matches!(reply, RedisValue::Null) {
-        if is_quiet {
-            return Ok(());                   // quiet miss ⇒ no reply
-        } else {
-            return send_simple(sock, &req, ST_NF, &[]);
-        }
+/// Extract an integer from a Redis EVAL array result element.
+#[cfg(not(test))]
+fn eval_int(v: &RedisValue) -> i64 {
+    match v {
+        RedisValue::Integer(n) => *n,
+        _ => 0,
+    }
+}
+
+/// Extract a bulk string from a Redis EVAL array result element.
+#[cfg(not(test))]
+fn eval_str(v: &RedisValue) -> String {
+    match v {
+        RedisValue::BulkString(s) => s.clone(),
+        RedisValue::BulkRedisString(s) => s.to_string_lossy(),
+        RedisValue::SimpleString(s) => s.clone(),
+        RedisValue::SimpleStringStatic(s) => (*s).to_string(),
+        _ => String::new(),
+    }
+}
+
+/* ------------ GET / GETQ / GETK / GETKQ ------------ */
+#[cfg(not(test))]
+fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
+    let rk = make_redis_key(req.key);
+
+    // Use Lua script to atomically fetch value, flags, CAS.
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[LUA_GET.as_bytes(), b"1", rk.as_slice()];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL get error: {reply:?}")));
     }
 
-    // -----------------------------------------------------------------
-    // 2.  Hit  → build extras(4B flags=0) + optional key + value
-    // -----------------------------------------------------------------
-    let json: String =
-        reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
+    // Parse result: {status, value, flags_string, cas_string}
+    let fields = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 4 => arr,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL get unexpected: {reply:?}")));
+        }
+    };
 
-    // build extras (flags) and optional key separately
-    let extras = 0u32.to_be_bytes();
-    let key_part = if matches!(req.hdr.opcode, GetK | GetKQ) {
+    let status_code = eval_int(&fields[0]);
+    if status_code == -1 {
+        // NOT_FOUND
+        STAT_GET_MISSES.fetch_add(1, Ordering::Relaxed);
+        if opcode.is_quiet() {
+            return Ok(());
+        }
+        write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    STAT_GET_HITS.fetch_add(1, Ordering::Relaxed);
+
+    // Value is hex-encoded by the Lua script to avoid redis-module
+    // UTF-8 conversion panics on binary payloads.  Decode it here.
+    let hex_str = eval_str(&fields[1]);
+    let value_bytes = hex_decode(&hex_str);
+
+    let flags: u32 = eval_str(&fields[2]).parse().unwrap_or(0);
+    let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
+
+    let extras = flags.to_be_bytes();
+    let key_part = if opcode.includes_key() {
         req.key
     } else {
         &[]
     };
-    let value_part = json.as_bytes();
 
-    // send_full now receives the three slices separately
-    send_full(
-        sock,
-        &req,
-        ST_OK,
-        &extras,
-        key_part,
-        value_part,
-    )
-}
-
-/* ------ SET / ADD / REPLACE ------ */
-fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
-    if req.extras.len() != 8 {
-        return send_simple(sock, &req, ST_ARGS, &[]);
-    }
-
-    let expiry = BigEndian::read_u32(&req.extras[4..8]);
-    let key = std::str::from_utf8(req.key)?;
-    let val = std::str::from_utf8(req.value)?;
-
-    let exists = match with_ctx(|ctx| ctx.call("EXISTS", &[key])) {
-        Ok(RedisValue::Integer(n)) => n,
-        Ok(other) => {
-            eprintln!("[cbbridge] EXISTS returned unexpected value: {other:?}");
-            0
-        }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
-    };
-
-    use Opcode::*;
-    let (do_it, err_if_skip) = match req.hdr.opcode {
-        Set => (true, ST_OK),
-        Add => (exists == 0, ST_IX),
-        Replace => (exists != 0, ST_NF),
-        _ => (false, ST_UNK),
-    };
-    if !do_it {
-        return send_simple(sock, &req, err_if_skip, &[]);
-    }
-
-    with_ctx(|ctx| ctx.call("JSON.SET", &[key, "$", val]))
-        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
-    if expiry != 0 {
-        with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
-    }
-    send_full(sock, &req, ST_OK, &[], &[], &[])
-}
-
-/* ------------- DELETE ------------- */
-fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
-    let key = std::str::from_utf8(req.key)?;
-    let deleted = match with_ctx(|ctx| ctx.call("DEL", &[key])) {
-        Ok(RedisValue::Integer(n)) => n,
-        Ok(other) => {
-            eprintln!("[cbbridge] DEL returned unexpected value: {other:?}");
-            0
-        }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
-    };
-    send_simple(
-        sock,
-        &req,
-        if deleted == 1 { ST_OK } else { ST_NF },
-        &[],
-    )
-}
-
-/* --------- INCR / DECR --------- */
-fn op_counter(
-    req: Request<'_>,
-    sock: &mut TcpStream,
-) -> Br<()> {
-    // Extras = delta(8) + initial(8) + expiry(4)  ---> 20 bytes
-    if req.extras.len() != 20 {
-        return send_simple(sock, &req, ST_ARGS, &[]);
-    }
-
-    let delta   = BigEndian::read_u64(&req.extras[0..8])  as i64;
-    let initial = BigEndian::read_u64(&req.extras[8..16]) as i64;
-    let expiry  = BigEndian::read_u32(&req.extras[16..20]);
-    let key     = std::str::from_utf8(req.key)?;
-
-    /* decrement == negative delta */
-    let signed = if req.hdr.opcode == Opcode::Decrement {
-        -(delta as i64)
-    } else {
-        delta as i64
-    };
-
-    /* ------------------------------------------------------------------
-       Try JSON.NUMINCRBY.  If the key / path is missing RedisJSON returns
-       Null; we then seed the document with the initial value.
-       ------------------------------------------------------------------ */
-    let new_val: i64 = match with_ctx(|ctx| {
-        ctx.call("JSON.NUMINCRBY", &[key, "$", &signed.to_string()])
-    }) {
-        /* key existed → parse new value */
-        Ok(redis_module::RedisValue::Null) => {
-            // seed and (optionally) set TTL
-            with_ctx(|ctx| ctx.call("JSON.SET", &[key, "$", &initial.to_string()])).ok();
-            if expiry != 0 {
-                with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
-            }
-            initial
-        }
-        Ok(val) => {
-            // NUMINCRBY returns the number as a JSON string (e.g. "42")
-            let s: String = val.try_into().map_err(|e:RedisError| BridgeErr::Redis(e.to_string()))?;
-            s.parse().unwrap_or(0)
-        }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
-    };
-
-    /* build and send response: extras=0, keylen=0, body=8-byte counter */
-    send_full(sock, &req, ST_OK, &[], &[], &new_val.to_be_bytes())
-}
-
-/* ============================================================
-   6.  Reply helpers
-   ========================================================= */
-
-fn send_simple(
-    sock: &mut TcpStream,
-    req: &Request<'_>,
-    status: u16,
-    body: &[u8],
-) -> Br<()> {
-    send_full(sock, req, status, &[], &[], body)
-}
-
-fn send_full(
-    sock: &mut TcpStream,
-    req: &Request<'_>,
-    status: u16,
-    extras: &[u8],
-    key: &[u8],
-    value: &[u8],
-) -> Br<()> {
-    let total_body = extras.len() as u32 + key.len() as u32 + value.len() as u32;
-
-    let mut hdr = [0u8; 24];
-    hdr[0] = MAGIC_RES;
-    hdr[1] = req.hdr.opcode as u8;
-    BigEndian::write_u16(&mut hdr[2..4], key.len() as u16);
-    hdr[4] = extras.len() as u8;
-    BigEndian::write_u16(&mut hdr[6..8], status);
-    BigEndian::write_u32(&mut hdr[8..12], total_body);
-    BigEndian::write_u32(&mut hdr[12..16], req.hdr.opaque);
-    BigEndian::write_u64(&mut hdr[16..24], 1); // fake CAS
-
-    sock.write_all(&hdr)?;
-    sock.write_all(extras)?;
-    sock.write_all(key)?;     // present only for GETK / GETKQ
-    sock.write_all(value)?;
+    write_response(
+        out, opcode, ST_OK, req.hdr.opaque, cas,
+        &extras, key_part, &value_bytes,
+    )?;
     Ok(())
 }
 
+/* ------ SET / ADD / REPLACE (and quiet variants) ------ */
+#[cfg(not(test))]
+fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+    STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
+
+    if req.extras.len() != 8 {
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let flags = BigEndian::read_u32(&req.extras[0..4]);
+    let expiry = BigEndian::read_u32(&req.extras[4..8]);
+    let rk = make_redis_key(req.key);
+
+    let op_name = match base {
+        Opcode::Set => "set",
+        Opcode::Add => "add",
+        Opcode::Replace => "replace",
+        _ => "set",
+    };
+
+    let req_cas = req.hdr.cas.to_string();
+    let flags_str = flags.to_string();
+    let expiry_str = expiry.to_string();
+
+    // EVAL LUA_STORE 2 <key> <cas_counter> <op> <value> <flags> <cas> <expiry>
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_STORE.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            op_name.as_bytes(),
+            req.value,
+            flags_str.as_bytes(),
+            req_cas.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL store error: {reply:?}")));
+    }
+
+    // Parse the Lua result: {status, new_cas_string}
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL store unexpected: {reply:?}")));
+        }
+    };
+
+    // Track CAS stats for CAS-conditional stores.
+    let is_cas_op = req.hdr.cas != 0;
+    match status_code {
+        0 => {
+            // Success
+            if is_cas_op {
+                STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            if !opcode.is_quiet() {
+                write_response(
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                )?;
+            }
+        }
+        -1 => {
+            // NOT_FOUND (REPLACE on missing key, or CAS on missing key)
+            if is_cas_op {
+                STAT_CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // KEY_EXISTS (ADD on existing key, or CAS mismatch)
+            if is_cas_op {
+                STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed);
+            }
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL store unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- DELETE / DELETEQ ------------- */
+#[cfg(not(test))]
+fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let rk = make_redis_key(req.key);
+    let req_cas = req.hdr.cas.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_DELETE.as_bytes(),
+            b"1",
+            rk.as_slice(),
+            req_cas.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL delete error: {reply:?}")));
+    }
+
+    let status_code = match &reply {
+        RedisValue::Integer(n) => *n,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL delete unexpected: {reply:?}")));
+        }
+    };
+
+    match status_code {
+        0 => {
+            STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
+            // Deleted successfully.
+            if opcode.is_quiet() {
+                return Ok(());
+            }
+            // For DELETE success, we don't return the old CAS — just a non-zero one.
+            // Use a fresh CAS from the counter for the response.
+            let new_cas = get_next_cas();
+            write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+        }
+        -1 => {
+            STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
+            // NOT_FOUND
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // KEY_EXISTS (CAS mismatch)
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL delete unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/// Get the next CAS value from the Redis counter.
+#[cfg(not(test))]
+fn get_next_cas() -> u64 {
+    match with_ctx(|ctx| ctx.call("INCR", &[CAS_COUNTER_KEY])) {
+        Ok(RedisValue::Integer(n)) => n as u64,
+        _ => 1,
+    }
+}
+
+/* --------- INCR / DECR (and quiet variants) --------- */
+#[cfg(not(test))]
+fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+
+    if req.extras.len() != 20 {
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let delta   = BigEndian::read_u64(&req.extras[0..8]);
+    let initial = BigEndian::read_u64(&req.extras[8..16]);
+    let expiry  = BigEndian::read_u32(&req.extras[16..20]);
+    let rk = make_redis_key(req.key);
+
+    let is_decr = if base == Opcode::Decrement { "1" } else { "0" };
+    let delta_str = delta.to_string();
+    let initial_str = initial.to_string();
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_COUNTER.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            delta_str.as_bytes(),
+            is_decr.as_bytes(),
+            initial_str.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL counter error: {reply:?}")));
+    }
+
+    // Parse result: {status, value_string, cas_string}
+    let (status_code, value_str, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 3 => {
+            let st = eval_int(&arr[0]);
+            let val = eval_str(&arr[1]);
+            let cas_s = eval_str(&arr[2]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, val, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL counter unexpected: {reply:?}")));
+        }
+    };
+
+    let is_incr = base == Opcode::Increment;
+    match status_code {
+        0 => {
+            if is_incr {
+                STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            // Parse the counter value as u64.
+            let counter_val: u64 = value_str.parse().unwrap_or(0);
+            if !opcode.is_quiet() {
+                write_response(
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas,
+                    &[], &[], &counter_val.to_be_bytes(),
+                )?;
+            }
+        }
+        -1 => {
+            if is_incr {
+                STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            // NOT_FOUND (0xFFFFFFFF expiry)
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -3 => {
+            // Non-numeric value
+            write_simple_response(
+                out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO,
+                b"Non-numeric value",
+            )?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL counter unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- TOUCH ------------- */
+#[cfg(not(test))]
+fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
+
+    if req.extras.len() != 4 {
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let expiry = BigEndian::read_u32(&req.extras[0..4]);
+    let rk = make_redis_key(req.key);
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_TOUCH.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL touch error: {reply:?}")));
+    }
+
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL touch unexpected: {reply:?}")));
+        }
+    };
+
+    match status_code {
+        0 => {
+            if !opcode.is_quiet() {
+                write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+            }
+        }
+        -1 => {
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL touch unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- GAT (Get And Touch) ------------- */
+#[cfg(not(test))]
+fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
+    STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
+
+    if req.extras.len() != 4 {
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let expiry = BigEndian::read_u32(&req.extras[0..4]);
+    let rk = make_redis_key(req.key);
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_GAT.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL gat error: {reply:?}")));
+    }
+
+    let fields = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 4 => arr,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL gat unexpected: {reply:?}")));
+        }
+    };
+
+    let status_code = eval_int(&fields[0]);
+    if status_code == -1 {
+        if opcode.is_quiet() {
+            return Ok(());
+        }
+        write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let hex_str = eval_str(&fields[1]);
+    let value_bytes = hex_decode(&hex_str);
+    let flags: u32 = eval_str(&fields[2]).parse().unwrap_or(0);
+    let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
+
+    let extras = flags.to_be_bytes();
+    let key_part = if opcode.includes_key() {
+        req.key
+    } else {
+        &[]
+    };
+
+    write_response(
+        out, opcode, ST_OK, req.hdr.opaque, cas,
+        &extras, key_part, &value_bytes,
+    )?;
+    Ok(())
+}
+
+/* ------------- APPEND / PREPEND ------------- */
+#[cfg(not(test))]
+fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+    // Append/Prepend are mutation commands; count under cmd_set
+    // (matches standard memcached stat semantics).
+    STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
+
+    // Append/Prepend: no extras expected, key + value in body.
+    if !req.extras.is_empty() {
+        write_simple_response(out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let rk = make_redis_key(req.key);
+    let req_cas = req.hdr.cas.to_string();
+
+    let lua_script = if base == Opcode::Append { LUA_APPEND } else { LUA_PREPEND };
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            lua_script.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            req.value,
+            req_cas.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL append/prepend error: {reply:?}")));
+    }
+
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL append/prepend unexpected: {reply:?}")));
+        }
+    };
+
+    match status_code {
+        0 => {
+            if !opcode.is_quiet() {
+                write_response(
+                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                )?;
+            }
+        }
+        -5 => {
+            // NOT_STORED — key does not exist
+            write_simple_response(out, opcode, ST_NOT_STORED, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // CAS mismatch
+            write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL append/prepend unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- FLUSH ------------- */
+#[cfg(not(test))]
+fn op_flush(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_FLUSH.fetch_add(1, Ordering::Relaxed);
+
+    // Flush deletes all rc: prefixed keys.
+    // Use SCAN + DEL pattern to avoid blocking on large keyspaces.
+    with_ctx(|ctx| {
+        // Use Lua to scan and delete all rc:* keys atomically.
+        let lua = r#"
+local cursor = '0'
+local count = 0
+repeat
+  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 100)
+  cursor = result[1]
+  local keys = result[2]
+  if #keys > 0 then
+    for i, key in ipairs(keys) do
+      redis.call('DEL', key)
+      count = count + 1
+    end
+  end
+until cursor == '0'
+return count
+"#;
+        let args: &[&[u8]] = &[lua.as_bytes(), b"0"];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if !opcode.is_quiet() {
+        write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+    }
+    Ok(())
+}
+
+/* ------------- VERSION ------------- */
+#[cfg(not(test))]
+fn op_version(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let version = b"RedCouch 0.1.0";
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, version)?;
+    Ok(())
+}
+
+/* ------------- SASL auth (GA: permissive, no auth enforcement) ------------- */
+
+/// SASL_LIST_MECHS — return the list of supported SASL mechanisms.
+/// GA behavior: returns "PLAIN" so clients know the mechanism is available.
+/// No actual authentication is enforced in this GA release.
+#[cfg(not(test))]
+fn op_sasl_list_mechs(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, b"PLAIN")?;
+    Ok(())
+}
+
+/// SASL_AUTH — accept PLAIN authentication.
+/// GA behavior: accepts any credentials and returns ST_OK.  This lets
+/// SASL-requiring clients (e.g. Couchbase SDKs) connect without error.
+/// When real auth enforcement is needed post-GA, this handler should
+/// validate credentials against a configured source.
+#[cfg(not(test))]
+fn op_sasl_auth(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
+
+    // The mechanism name is in the key field.
+    let mechanism = std::str::from_utf8(req.key).unwrap_or("");
+    if mechanism != "PLAIN" {
+        STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
+        write_simple_response(
+            out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+            b"Unsupported SASL mechanism",
+        )?;
+        return Ok(());
+    }
+
+    // PLAIN auth: accept any credentials for GA.
+    // The value field contains the PLAIN payload: \0<username>\0<password>
+    write_simple_response(
+        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        b"Authenticated",
+    )?;
+    Ok(())
+}
+
+/// SASL_STEP — continue a multi-step SASL handshake.
+/// GA behavior: PLAIN is single-step, so any SASL_STEP is unexpected.
+/// Return ST_AUTH_ERROR to signal the handshake is already complete.
+#[cfg(not(test))]
+fn op_sasl_step(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
+    STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
+    write_simple_response(
+        out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+        b"SASL step not expected for PLAIN mechanism",
+    )?;
+    Ok(())
+}
+
+/* ------------- STAT ------------- */
+
+/// Lua script to count current items (rc:* keys).
+#[cfg(not(test))]
+const LUA_COUNT_ITEMS: &str = r#"
+local cursor = '0'
+local count = 0
+repeat
+  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 1000)
+  cursor = result[1]
+  count = count + #result[2]
+until cursor == '0'
+return count
+"#;
+
+/// STAT — return server statistics.
+///
+/// Binary STAT protocol:
+/// - Each stat is a response with opcode=STAT, the stat name in the key
+///   field, and the stat value in the value field.
+/// - The sequence ends with a response that has empty key and empty value.
+/// - If the request key is empty, return general stats.
+/// - If the request key names a group we don't support, return empty
+///   (just the terminator).
+#[cfg(not(test))]
+fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let stat_key = std::str::from_utf8(req.key).unwrap_or("");
+
+    match stat_key {
+        "" => {
+            // General stats.
+            let uptime = STARTUP_INSTANT
+                .get()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let pid = std::process::id();
+
+            // Count current items via Lua SCAN.
+            let curr_items: u64 = match with_ctx(|ctx| {
+                let args: &[&[u8]] = &[LUA_COUNT_ITEMS.as_bytes(), b"0"];
+                ctx.call("EVAL", args)
+            }) {
+                Ok(RedisValue::Integer(n)) => n as u64,
+                _ => 0,
+            };
+
+            let stats: Vec<(&str, String)> = vec![
+                ("pid", pid.to_string()),
+                ("uptime", uptime.to_string()),
+                ("time", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .to_string()),
+                ("version", "RedCouch 0.1.0".to_string()),
+                ("curr_items", curr_items.to_string()),
+                ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
+                ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
+                ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
+                ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
+                ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
+                ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
+                ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
+                ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
+                ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
+                ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
+                ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
+                ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
+                ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
+                ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
+                ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
+                ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
+                ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
+                ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("max_connections", MAX_CONNECTIONS.to_string()),
+            ];
+
+            for (name, value) in &stats {
+                write_response(
+                    out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+                    &[], name.as_bytes(), value.as_bytes(),
+                )?;
+            }
+        }
+        // Unsupported stat groups — return just the terminator.
+        // This includes "settings", "items", "slabs", "conns", etc.
+        // These are intentionally unsupported in the GA release.
+        _ => {}
+    }
+
+    // Terminator: empty key + empty value.
+    write_response(
+        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        &[], &[], &[],
+    )?;
+    Ok(())
+}
+
+/* ------------- VERBOSITY ------------- */
+
+/// VERBOSITY — set server verbosity level.
+/// GA behavior: accept and return ST_OK as a no-op.  RedCouch does not
+/// currently support dynamic verbosity levels; logging is controlled
+/// by Redis module logging.
+#[cfg(not(test))]
+fn op_verbosity(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+    Ok(())
+}
+
+
 /* ============================================================
-   7.  Module declaration  (allocator + init)
+   Module declaration  (allocator + init)
    ========================================================= */
 
+#[cfg(not(test))]
 fn module_init(ctx: &Context, _args: &[RedisString]) -> Status {
+    let _ = STARTUP_INSTANT.set(Instant::now());
     LISTENER.call_once(spawn_listener);
-    ctx.log_notice("cbbridge: listener started on 11210");
+    ctx.log_notice(&format!(
+        "redcouch: listener started on {} (max_connections={}, read_timeout={}s, write_timeout={}s, max_body={})",
+        DEFAULT_BIND_ADDR,
+        MAX_CONNECTIONS,
+        SOCKET_READ_TIMEOUT.as_secs(),
+        SOCKET_WRITE_TIMEOUT.as_secs(),
+        MAX_BODY_LEN,
+    ));
     Status::Ok
 }
 
+#[cfg(not(test))]
 redis_module! {
-    name: "cbbridge",
+    name: "redcouch",
     version: 1,
     allocator: (
         redis_module::alloc::RedisAlloc,
