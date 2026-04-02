@@ -86,12 +86,18 @@ def percentiles(vals, ps=(50, 95, 99)):
     return out
 
 # ── Workload runner ─────────────────────────────────────────────────
+# Status codes considered "expected" per workload (not protocol errors).
+# ST_NF (key not found) is expected for get_miss, delete, etc.
+EXPECTED_STATUSES = {0x0000, 0x0001, 0x0005}  # ST_OK, ST_NF, ST_NOT_STORED
+
 def run_workload(name, op_fn, num_clients, duration_s):
     """Run op_fn in a loop for duration_s seconds across num_clients threads.
-    Returns dict with throughput, latency percentiles, error count."""
+    Returns dict with throughput, latency percentiles, error count, and
+    unexpected protocol status counts."""
     latencies = []
     errors = [0]
     ops = [0]
+    unexpected_statuses = [0]
     lock = threading.Lock()
     stop = threading.Event()
 
@@ -99,6 +105,7 @@ def run_workload(name, op_fn, num_clients, duration_s):
         local_lats = []
         local_ops = 0
         local_errs = 0
+        local_unexpected = 0
         try:
             s = make_conn()
         except Exception:
@@ -109,8 +116,11 @@ def run_workload(name, op_fn, num_clients, duration_s):
             while not stop.is_set():
                 t0 = time.monotonic()
                 try:
-                    op_fn(s)
+                    resp = op_fn(s)
                     local_ops += 1
+                    # Check for unexpected protocol-level statuses
+                    if resp is not None and resp.get("status") not in EXPECTED_STATUSES:
+                        local_unexpected += 1
                 except Exception:
                     local_errs += 1
                 elapsed = time.monotonic() - t0
@@ -122,6 +132,7 @@ def run_workload(name, op_fn, num_clients, duration_s):
                 latencies.extend(local_lats)
                 errors[0] += local_errs
                 ops[0] += local_ops
+                unexpected_statuses[0] += local_unexpected
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(num_clients)]
     t_start = time.monotonic()
@@ -134,6 +145,7 @@ def run_workload(name, op_fn, num_clients, duration_s):
     wall = time.monotonic() - t_start
 
     pcts = percentiles(latencies)
+    total_attempted = ops[0] + errors[0]
     return {
         "workload": name,
         "clients": num_clients,
@@ -143,7 +155,8 @@ def run_workload(name, op_fn, num_clients, duration_s):
         "latency_us": {**pcts, "max": max(latencies) if latencies else 0,
                        "mean": round(statistics.mean(latencies), 1) if latencies else 0},
         "errors": errors[0],
-        "error_rate": round(errors[0] / max(ops[0] + errors[0], 1) * 100, 2),
+        "unexpected_statuses": unexpected_statuses[0],
+        "error_rate": round(errors[0] / max(total_attempted, 1) * 100, 2),
     }
 
 SMALL_VAL = b"x" * 64
@@ -276,6 +289,21 @@ def capture_resources():
         info["resource_capture_error"] = str(e)
     return info
 
+def capture_connected_clients():
+    """Quick query for current connected_clients count (best-effort)."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["redis-cli", "-p", str(REDIS_PORT), "INFO", "clients"],
+            capture_output=True, text=True, timeout=2
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("connected_clients:"):
+                return int(line.split(":")[1])
+    except Exception:
+        pass
+    return None
+
 
 # ── Workload registry ───────────────────────────────────────────────
 WORKLOADS = [
@@ -322,12 +350,11 @@ def main():
 
     for num_clients in CLIENTS:
         print(f"\n── {num_clients} client(s) ────────────────────────────────")
-        # Seed and capture pre-run resources
+        # Seed once per client-count block
         flush_data()
         time.sleep(0.5)
         seed_data()
         time.sleep(0.5)
-        pre_resources = capture_resources()
 
         for wl_name, wl_fn in WORKLOADS:
             run_num += 1
@@ -335,16 +362,25 @@ def main():
             sys.stdout.write(f"  {label} {wl_name:.<30s}")
             sys.stdout.flush()
 
+            # Capture resources before this specific workload
+            pre_resources = capture_resources()
+
             result = run_workload(wl_name, wl_fn, num_clients, DURATION)
+
+            # Capture resources after workload (sockets already closed)
             post_resources = capture_resources()
             result["resources_before"] = pre_resources
             result["resources_after"] = post_resources
+            # Record configured concurrency (connected_clients from INFO
+            # reflects only the sample instant; record intended concurrency)
+            result["configured_clients"] = num_clients
             all_results.append(result)
 
             tput = result["throughput_ops_sec"]
             p99 = result["latency_us"]["p99"]
             errs = result["errors"]
-            print(f" {tput:>10.0f} ops/s  p99={p99:>8.0f}µs  errs={errs}")
+            ustatus = result["unexpected_statuses"]
+            print(f" {tput:>10.0f} ops/s  p99={p99:>8.0f}µs  errs={errs}  bad_status={ustatus}")
 
     # Write results
     output_data = {"meta": run_meta, "results": all_results}
@@ -356,13 +392,13 @@ def main():
     # Summary table
     print("\n── Summary ─────────────────────────────────────────────────")
     print(f"{'Workload':<25s} {'Clients':>7s} {'Ops/s':>10s} {'p50µs':>8s} "
-          f"{'p95µs':>8s} {'p99µs':>8s} {'MaxµS':>8s} {'Errs':>5s}")
-    print("─" * 82)
+          f"{'p95µs':>8s} {'p99µs':>8s} {'MaxµS':>8s} {'Errs':>5s} {'Bad':>5s}")
+    print("─" * 90)
     for r in all_results:
         lat = r["latency_us"]
         print(f"{r['workload']:<25s} {r['clients']:>7d} {r['throughput_ops_sec']:>10.0f} "
               f"{lat['p50']:>8.0f} {lat['p95']:>8.0f} {lat['p99']:>8.0f} "
-              f"{lat['max']:>8.0f} {r['errors']:>5d}")
+              f"{lat['max']:>8.0f} {r['errors']:>5d} {r['unexpected_statuses']:>5d}")
 
     return 0
 

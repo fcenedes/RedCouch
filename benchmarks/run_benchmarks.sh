@@ -136,11 +136,13 @@ REDIS_PORT="$REDIS_PORT" \
 BENCH_PORT="$MEMCACHED_PORT" \
     python3 "$SCRIPT_DIR/bench_binary_protocol.py" || EXIT_CODE=$?
 
-# Copy to latest.json for easy access
+# Atomic symlink update: latest.json → timestamped result file
 if [ -f "$RESULT_FILE" ]; then
-    cp "$RESULT_FILE" "$LATEST_FILE"
+    RESULT_BASENAME="$(basename "$RESULT_FILE")"
+    ln -sf "$RESULT_BASENAME" "$LATEST_FILE.tmp"
+    mv -f "$LATEST_FILE.tmp" "$LATEST_FILE"
     echo ""
-    echo "Results also copied to $LATEST_FILE"
+    echo "Results symlinked: latest.json → $RESULT_BASENAME"
 fi
 
 echo ""
