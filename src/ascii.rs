@@ -306,11 +306,12 @@ use std::sync::atomic::Ordering;
 use bytes::{Buf, BytesMut};
 #[cfg(not(test))]
 use crate::{
-    Br, BridgeErr, with_ctx, eval_int, eval_str, hex_decode, make_redis_key,
-    CAS_COUNTER_KEY, LUA_STORE, LUA_GET, LUA_DELETE,
-    LUA_COUNTER, LUA_TOUCH, LUA_GAT, LUA_APPEND, LUA_PREPEND,
-    LUA_META_GET,
-    LUA_COUNT_ITEMS, MAX_CONNECTIONS,
+    Br, BridgeErr, with_ctx, eval_int, eval_str, hex_decode, make_redis_key, eval_lua,
+    CAS_COUNTER_KEY,
+    SCRIPT_STORE, SCRIPT_GET, SCRIPT_DELETE,
+    SCRIPT_COUNTER, SCRIPT_TOUCH, SCRIPT_GAT, SCRIPT_APPEND, SCRIPT_PREPEND,
+    SCRIPT_META_GET, SCRIPT_FLUSH, SCRIPT_COUNT_ITEMS,
+    MAX_CONNECTIONS,
     STAT_CMD_GET, STAT_CMD_SET, STAT_CMD_FLUSH, STAT_CMD_TOUCH,
     STAT_GET_HITS, STAT_GET_MISSES, STAT_DELETE_HITS, STAT_DELETE_MISSES,
     STAT_INCR_HITS, STAT_INCR_MISSES, STAT_DECR_HITS, STAT_DECR_MISSES,
@@ -698,13 +699,13 @@ fn ascii_store(
     let expiry_str = exptime.to_string();
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_STORE.as_bytes(), b"2",
+        let keys_and_args: &[&[u8]] = &[
+            b"2",
             rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
             op_name.as_bytes(), value,
             flags_str.as_bytes(), cas_str.as_bytes(), expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -771,19 +772,17 @@ fn ascii_retrieval(
         let reply = if is_gat {
             let exp_str = exptime.unwrap_or(0).to_string();
             with_ctx(|ctx| {
-                let args: &[&[u8]] = &[
-                    LUA_GAT.as_bytes(), b"2",
+                let keys_and_args: &[&[u8]] = &[
+                    b"2",
                     rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
                     exp_str.as_bytes(),
                 ];
-                ctx.call("EVAL", args)
+                eval_lua(ctx, &SCRIPT_GAT, keys_and_args)
             }).map_err(|e| BridgeErr::Redis(e.to_string()))?
         } else {
             with_ctx(|ctx| {
-                let args: &[&[u8]] = &[
-                    LUA_GET.as_bytes(), b"1", rk.as_slice(),
-                ];
-                ctx.call("EVAL", args)
+                let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
+                eval_lua(ctx, &SCRIPT_GET, keys_and_args)
             }).map_err(|e| BridgeErr::Redis(e.to_string()))?
         };
 
@@ -826,11 +825,10 @@ fn ascii_retrieval(
 #[cfg(not(test))]
 fn ascii_delete(key: &[u8], noreply: bool, out: &mut Vec<u8>) -> Br<()> {
     let rk = make_redis_key(key);
+    // ASCII delete never uses CAS — always non-CAS path.
+    // Use direct DEL for the fast non-CAS bypass.
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_DELETE.as_bytes(), b"1", rk.as_slice(), b"0",
-        ];
-        ctx.call("EVAL", args)
+        ctx.call("DEL", &[rk.as_slice()])
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -838,7 +836,8 @@ fn ascii_delete(key: &[u8], noreply: bool, out: &mut Vec<u8>) -> Br<()> {
         return Ok(());
     }
 
-    let status = match &reply {
+    // DEL returns the number of keys deleted: 1 = found+deleted, 0 = not found.
+    let deleted_count = match &reply {
         RedisValue::Integer(n) => *n,
         _ => {
             if !noreply { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
@@ -846,15 +845,12 @@ fn ascii_delete(key: &[u8], noreply: bool, out: &mut Vec<u8>) -> Br<()> {
         }
     };
 
-    match status {
-        0 => {
-            STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
-            if !noreply { out.extend_from_slice(b"DELETED\r\n"); }
-        }
-        _ => {
-            STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
-            if !noreply { out.extend_from_slice(b"NOT_FOUND\r\n"); }
-        }
+    if deleted_count > 0 {
+        STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
+        if !noreply { out.extend_from_slice(b"DELETED\r\n"); }
+    } else {
+        STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
+        if !noreply { out.extend_from_slice(b"NOT_FOUND\r\n"); }
     }
     Ok(())
 }
@@ -871,13 +867,13 @@ fn ascii_counter(is_decr: bool, key: &[u8], delta: u64, noreply: bool, out: &mut
     let expiry_str = "4294967295";
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_COUNTER.as_bytes(), b"2",
+        let keys_and_args: &[&[u8]] = &[
+            b"2",
             rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
             delta_str.as_bytes(), is_decr_str.as_bytes(),
             initial_str.as_bytes(), expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -930,12 +926,12 @@ fn ascii_touch(key: &[u8], exptime: u32, noreply: bool, out: &mut Vec<u8>) -> Br
     let exp_str = exptime.to_string();
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_TOUCH.as_bytes(), b"2",
+        let keys_and_args: &[&[u8]] = &[
+            b"2",
             rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
             exp_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_TOUCH, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -965,15 +961,15 @@ fn ascii_append_prepend(
 ) -> Br<()> {
     STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(key);
-    let lua_script = if is_prepend { LUA_PREPEND } else { LUA_APPEND };
+    let script = if is_prepend { &SCRIPT_PREPEND } else { &SCRIPT_APPEND };
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            lua_script.as_bytes(), b"2",
+        let keys_and_args: &[&[u8]] = &[
+            b"2",
             rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
             value, b"0",
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, script, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -1005,26 +1001,10 @@ fn ascii_append_prepend(
 fn ascii_flush(noreply: bool, out: &mut Vec<u8>) -> Br<()> {
     STAT_CMD_FLUSH.fetch_add(1, Ordering::Relaxed);
 
-    // Same SCAN+DEL pattern as the binary flush handler.
+    // Flush via EVALSHA (NOSCRIPT fallback) — same as binary flush handler.
     with_ctx(|ctx| {
-        let lua = r#"
-local cursor = '0'
-local count = 0
-repeat
-  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 100)
-  cursor = result[1]
-  local keys = result[2]
-  if #keys > 0 then
-    for i, key in ipairs(keys) do
-      redis.call('DEL', key)
-      count = count + 1
-    end
-  end
-until cursor == '0'
-return count
-"#;
-        let args: &[&[u8]] = &[lua.as_bytes(), b"0"];
-        ctx.call("EVAL", args)
+        let keys_and_args: &[&[u8]] = &[b"0"];
+        eval_lua(ctx, &SCRIPT_FLUSH, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if !noreply { out.extend_from_slice(b"OK\r\n"); }
@@ -1061,26 +1041,22 @@ fn meta_get(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
         let exp_str = ttl_str.to_string();
         with_ctx(|ctx| {
             // First touch to update TTL.
-            let touch_args: &[&[u8]] = &[
-                LUA_TOUCH.as_bytes(), b"2",
+            let touch_keys_and_args: &[&[u8]] = &[
+                b"2",
                 rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
                 exp_str.as_bytes(),
             ];
-            ctx.call("EVAL", touch_args)
+            eval_lua(ctx, &SCRIPT_TOUCH, touch_keys_and_args)
         }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
         // Then get with TTL info.
         with_ctx(|ctx| {
-            let args: &[&[u8]] = &[
-                LUA_META_GET.as_bytes(), b"1", rk.as_slice(),
-            ];
-            ctx.call("EVAL", args)
+            let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
+            eval_lua(ctx, &SCRIPT_META_GET, keys_and_args)
         }).map_err(|e| BridgeErr::Redis(e.to_string()))?
     } else {
         with_ctx(|ctx| {
-            let args: &[&[u8]] = &[
-                LUA_META_GET.as_bytes(), b"1", rk.as_slice(),
-            ];
-            ctx.call("EVAL", args)
+            let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
+            eval_lua(ctx, &SCRIPT_META_GET, keys_and_args)
         }).map_err(|e| BridgeErr::Redis(e.to_string()))?
     };
 
@@ -1179,15 +1155,15 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
         "A" | "P" => {
             // Append/Prepend mode.
             let is_prepend = mode == "P";
-            let lua_script = if is_prepend { LUA_PREPEND } else { LUA_APPEND };
+            let script = if is_prepend { &SCRIPT_PREPEND } else { &SCRIPT_APPEND };
             let rk = make_redis_key(key);
             let reply = with_ctx(|ctx| {
-                let args: &[&[u8]] = &[
-                    lua_script.as_bytes(), b"2",
+                let keys_and_args: &[&[u8]] = &[
+                    b"2",
                     rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
                     data, cas.as_bytes(),
                 ];
-                ctx.call("EVAL", args)
+                eval_lua(ctx, script, keys_and_args)
             }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
             if is_redis_error(&reply) {
@@ -1248,13 +1224,13 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
             let expiry_str = ttl.to_string();
 
             let reply = with_ctx(|ctx| {
-                let args: &[&[u8]] = &[
-                    LUA_STORE.as_bytes(), b"2",
+                let keys_and_args: &[&[u8]] = &[
+                    b"2",
                     rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
                     op_name.as_bytes(), data,
                     flags_str.as_bytes(), cas_str.as_bytes(), expiry_str.as_bytes(),
                 ];
-                ctx.call("EVAL", args)
+                eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
             }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
             if is_redis_error(&reply) {
@@ -1323,20 +1299,38 @@ fn meta_delete(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
     let cas = get_flag_token(flags, b'C').unwrap_or("0");
     let quiet = has_flag(flags, b'q');
 
-    let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_DELETE.as_bytes(), b"1", rk.as_slice(), cas.as_bytes(),
-        ];
-        ctx.call("EVAL", args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    // Non-CAS DELETE bypass: when CAS is "0", use direct DEL instead of Lua.
+    let (reply, is_direct_del) = if cas == "0" {
+        let r = with_ctx(|ctx| {
+            ctx.call("DEL", &[rk.as_slice()])
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        (r, true)
+    } else {
+        let r = with_ctx(|ctx| {
+            let keys_and_args: &[&[u8]] = &[
+                b"1", rk.as_slice(), cas.as_bytes(),
+            ];
+            eval_lua(ctx, &SCRIPT_DELETE, keys_and_args)
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        (r, false)
+    };
 
     if is_redis_error(&reply) {
         if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
         return Ok(());
     }
 
+    // Direct DEL returns count (1=deleted, 0=not found).
+    // Lua DELETE returns status (0=OK, -1=NOT_FOUND, -2=CAS mismatch).
     let status = match &reply {
-        RedisValue::Integer(n) => *n,
+        RedisValue::Integer(n) => {
+            if is_direct_del {
+                // Map DEL count to Lua-compatible status codes.
+                if *n > 0 { 0 } else { -1 }
+            } else {
+                *n
+            }
+        }
         _ => {
             if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
             return Ok(());
@@ -1391,13 +1385,13 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
     let expiry = get_flag_token(flags, b'N').unwrap_or("4294967295");
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_COUNTER.as_bytes(), b"2",
+        let keys_and_args: &[&[u8]] = &[
+            b"2",
             rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
             delta_str.as_bytes(), is_decr_str.as_bytes(),
             initial.as_bytes(), expiry.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
@@ -1483,8 +1477,8 @@ fn ascii_stats(args: Option<&str>, out: &mut Vec<u8>) -> Br<()> {
             let pid = std::process::id();
 
             let curr_items: u64 = match with_ctx(|ctx| {
-                let args: &[&[u8]] = &[LUA_COUNT_ITEMS.as_bytes(), b"0"];
-                ctx.call("EVAL", args)
+                let keys_and_args: &[&[u8]] = &[b"0"];
+                eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
             }) {
                 Ok(RedisValue::Integer(n)) => n as u64,
                 _ => 0,

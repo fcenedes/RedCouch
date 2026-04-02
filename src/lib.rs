@@ -386,6 +386,129 @@ redis.call('HSET', KEYS[1], 'v', new_v, 'c', tostring(new_cas))
 return {0, tostring(new_cas)}
 "#;
 
+/// Lua script for FLUSH — atomically scans and deletes all rc:* keys.
+///
+/// Returns: count of deleted keys
+#[cfg(not(test))]
+pub(crate) const LUA_FLUSH: &str = r#"
+local cursor = '0'
+local count = 0
+repeat
+  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 100)
+  cursor = result[1]
+  local keys = result[2]
+  if #keys > 0 then
+    for i, key in ipairs(keys) do
+      redis.call('DEL', key)
+      count = count + 1
+    end
+  end
+until cursor == '0'
+return count
+"#;
+
+/* ============================================================
+   EVALSHA infrastructure — precompute SHA1 of each Lua script
+   and use EVALSHA with NOSCRIPT fallback for reduced network
+   overhead on every Redis call.
+   ========================================================= */
+
+#[cfg(not(test))]
+use std::sync::OnceLock;
+
+/// Holds a Lua script source and caches its SHA1 hex digest.
+#[cfg(not(test))]
+pub(crate) struct LuaScript {
+    pub source: &'static str,
+    sha1: OnceLock<String>,
+}
+
+#[cfg(not(test))]
+impl LuaScript {
+    pub const fn new(source: &'static str) -> Self {
+        Self { source, sha1: OnceLock::new() }
+    }
+
+    /// Return the SHA1 hex digest, computing it lazily on first call.
+    pub fn sha1(&self) -> &str {
+        self.sha1.get_or_init(|| {
+            use sha1::Digest;
+            let hash = sha1::Sha1::digest(self.source.as_bytes());
+            // Format as 40-char lowercase hex.
+            let mut hex = String::with_capacity(40);
+            for byte in hash.iter() {
+                use std::fmt::Write;
+                let _ = write!(hex, "{:02x}", byte);
+            }
+            hex
+        })
+    }
+}
+
+/// Static script instances for EVALSHA.
+#[cfg(not(test))]
+pub(crate) static SCRIPT_STORE:    LuaScript = LuaScript::new(LUA_STORE);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_GET:      LuaScript = LuaScript::new(LUA_GET);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_META_GET: LuaScript = LuaScript::new(LUA_META_GET);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_DELETE:   LuaScript = LuaScript::new(LUA_DELETE);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_COUNTER:  LuaScript = LuaScript::new(LUA_COUNTER);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_TOUCH:    LuaScript = LuaScript::new(LUA_TOUCH);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_GAT:      LuaScript = LuaScript::new(LUA_GAT);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_APPEND:   LuaScript = LuaScript::new(LUA_APPEND);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_PREPEND:  LuaScript = LuaScript::new(LUA_PREPEND);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_FLUSH:    LuaScript = LuaScript::new(LUA_FLUSH);
+#[cfg(not(test))]
+pub(crate) static SCRIPT_COUNT_ITEMS: LuaScript = LuaScript::new(LUA_COUNT_ITEMS);
+
+/// Execute a Lua script via EVALSHA with automatic NOSCRIPT fallback.
+///
+/// `keys_and_args` should contain everything after the script text/hash
+/// in the EVAL argument list: `[numkeys, key1, ..., arg1, ...]`.
+///
+/// On NOSCRIPT error from EVALSHA, transparently retries with full EVAL.
+#[cfg(not(test))]
+pub(crate) fn eval_lua(
+    ctx: &redis_module::Context,
+    script: &LuaScript,
+    keys_and_args: &[&[u8]],
+) -> Result<RedisValue, redis_module::RedisError> {
+    let sha1 = script.sha1();
+    let sha1_bytes = sha1.as_bytes();
+
+    // Build EVALSHA argument list: [sha1, numkeys, key1, ..., arg1, ...]
+    let mut args: Vec<&[u8]> = Vec::with_capacity(1 + keys_and_args.len());
+    args.push(sha1_bytes);
+    args.extend_from_slice(keys_and_args);
+
+    let result = ctx.call("EVALSHA", args.as_slice());
+
+    // Check for NOSCRIPT — script not in cache, fall back to EVAL.
+    match &result {
+        Ok(RedisValue::StaticError(e)) if e.contains("NOSCRIPT") => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("NOSCRIPT") {
+                return result;
+            }
+        }
+        _ => return result,
+    }
+
+    // Fallback: full EVAL with script source.
+    let mut eval_args: Vec<&[u8]> = Vec::with_capacity(1 + keys_and_args.len());
+    eval_args.push(script.source.as_bytes());
+    eval_args.extend_from_slice(keys_and_args);
+    ctx.call("EVAL", eval_args.as_slice())
+}
 
 /* ============================================================
    TCP listener (started once from module_init)
@@ -735,14 +858,14 @@ fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(req.key);
 
-    // Use Lua script to atomically fetch value, flags, CAS.
+    // Use EVALSHA to atomically fetch value, flags, CAS (NOSCRIPT fallback to EVAL).
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[LUA_GET.as_bytes(), b"1", rk.as_slice()];
-        ctx.call("EVAL", args)
+        let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
+        eval_lua(ctx, &SCRIPT_GET, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL get error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA get error: {reply:?}")));
     }
 
     // Parse result: {status, value, flags_string, cas_string}
@@ -815,10 +938,9 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let flags_str = flags.to_string();
     let expiry_str = expiry.to_string();
 
-    // EVAL LUA_STORE 2 <key> <cas_counter> <op> <value> <flags> <cas> <expiry>
+    // EVALSHA LUA_STORE 2 <key> <cas_counter> <op> <value> <flags> <cas> <expiry>
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_STORE.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"2",
             rk.as_slice(),
             CAS_COUNTER_KEY.as_bytes(),
@@ -828,11 +950,11 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             req_cas.as_bytes(),
             expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL store error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA store error: {reply:?}")));
     }
 
     // Parse the Lua result: {status, new_cas_string}
@@ -888,44 +1010,74 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
 fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let rk = make_redis_key(req.key);
-    let req_cas = req.hdr.cas.to_string();
 
+    // Non-CAS DELETE bypass: when request CAS is 0 (no CAS check), use
+    // a direct DEL command instead of the Lua script.  This is the common
+    // path — most clients don't set CAS on delete.
+    if req.hdr.cas == 0 {
+        let reply = with_ctx(|ctx| {
+            ctx.call("DEL", &[rk.as_slice()])
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+        if is_redis_error(&reply) {
+            return Err(BridgeErr::Redis(format!("DEL error: {reply:?}")));
+        }
+
+        // DEL returns the count of keys deleted: 1 = found+deleted, 0 = not found.
+        let deleted = match &reply {
+            RedisValue::Integer(n) => *n > 0,
+            _ => {
+                return Err(BridgeErr::Redis(format!("DEL unexpected reply: {reply:?}")));
+            }
+        };
+
+        if deleted {
+            STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
+            if opcode.is_quiet() {
+                return Ok(());
+            }
+            let new_cas = get_next_cas();
+            write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+        } else {
+            STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
+            write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        return Ok(());
+    }
+
+    // CAS-checked DELETE: use Lua script for atomic CAS comparison.
+    let req_cas = req.hdr.cas.to_string();
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_DELETE.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"1",
             rk.as_slice(),
             req_cas.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_DELETE, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL delete error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA delete error: {reply:?}")));
     }
 
     let status_code = match &reply {
         RedisValue::Integer(n) => *n,
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL delete unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!("EVALSHA delete unexpected: {reply:?}")));
         }
     };
 
     match status_code {
         0 => {
             STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
-            // Deleted successfully.
             if opcode.is_quiet() {
                 return Ok(());
             }
-            // For DELETE success, we don't return the old CAS — just a non-zero one.
-            // Use a fresh CAS from the counter for the response.
             let new_cas = get_next_cas();
             write_simple_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
         }
         -1 => {
             STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
-            // NOT_FOUND
             write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -2 => {
@@ -933,7 +1085,7 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL delete unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!("EVALSHA delete unknown status: {status_code}")));
         }
     }
     Ok(())
@@ -970,8 +1122,7 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let expiry_str = expiry.to_string();
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_COUNTER.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"2",
             rk.as_slice(),
             CAS_COUNTER_KEY.as_bytes(),
@@ -980,11 +1131,11 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             initial_str.as_bytes(),
             expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL counter error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA counter error: {reply:?}")));
     }
 
     // Parse result: {status, value_string, cas_string}
@@ -1057,18 +1208,17 @@ fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let expiry_str = expiry.to_string();
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_TOUCH.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"2",
             rk.as_slice(),
             CAS_COUNTER_KEY.as_bytes(),
             expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_TOUCH, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL touch error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA touch error: {reply:?}")));
     }
 
     let (status_code, new_cas) = match &reply {
@@ -1116,18 +1266,17 @@ fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let expiry_str = expiry.to_string();
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            LUA_GAT.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"2",
             rk.as_slice(),
             CAS_COUNTER_KEY.as_bytes(),
             expiry_str.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, &SCRIPT_GAT, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL gat error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA gat error: {reply:?}")));
     }
 
     let fields = match &reply {
@@ -1183,22 +1332,21 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let rk = make_redis_key(req.key);
     let req_cas = req.hdr.cas.to_string();
 
-    let lua_script = if base == Opcode::Append { LUA_APPEND } else { LUA_PREPEND };
+    let script = if base == Opcode::Append { &SCRIPT_APPEND } else { &SCRIPT_PREPEND };
 
     let reply = with_ctx(|ctx| {
-        let args: &[&[u8]] = &[
-            lua_script.as_bytes(),
+        let keys_and_args: &[&[u8]] = &[
             b"2",
             rk.as_slice(),
             CAS_COUNTER_KEY.as_bytes(),
             req.value,
             req_cas.as_bytes(),
         ];
-        ctx.call("EVAL", args)
+        eval_lua(ctx, script, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVAL append/prepend error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!("EVALSHA append/prepend error: {reply:?}")));
     }
 
     let (status_code, new_cas) = match &reply {
@@ -1242,28 +1390,10 @@ fn op_flush(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     STAT_CMD_FLUSH.fetch_add(1, Ordering::Relaxed);
 
-    // Flush deletes all rc: prefixed keys.
-    // Use SCAN + DEL pattern to avoid blocking on large keyspaces.
+    // Flush deletes all rc: prefixed keys via EVALSHA (NOSCRIPT fallback).
     with_ctx(|ctx| {
-        // Use Lua to scan and delete all rc:* keys atomically.
-        let lua = r#"
-local cursor = '0'
-local count = 0
-repeat
-  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 100)
-  cursor = result[1]
-  local keys = result[2]
-  if #keys > 0 then
-    for i, key in ipairs(keys) do
-      redis.call('DEL', key)
-      count = count + 1
-    end
-  end
-until cursor == '0'
-return count
-"#;
-        let args: &[&[u8]] = &[lua.as_bytes(), b"0"];
-        ctx.call("EVAL", args)
+        let keys_and_args: &[&[u8]] = &[b"0"];
+        eval_lua(ctx, &SCRIPT_FLUSH, keys_and_args)
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if !opcode.is_quiet() {
@@ -1377,10 +1507,10 @@ fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
                 .unwrap_or(0);
             let pid = std::process::id();
 
-            // Count current items via Lua SCAN.
+            // Count current items via EVALSHA SCAN (NOSCRIPT fallback).
             let curr_items: u64 = match with_ctx(|ctx| {
-                let args: &[&[u8]] = &[LUA_COUNT_ITEMS.as_bytes(), b"0"];
-                ctx.call("EVAL", args)
+                let keys_and_args: &[&[u8]] = &[b"0"];
+                eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
             }) {
                 Ok(RedisValue::Integer(n)) => n as u64,
                 _ => 0,
