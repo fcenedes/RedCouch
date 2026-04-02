@@ -346,6 +346,17 @@ pub(crate) fn handle_ascii_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<
             if line_bytes.is_empty() || line_bytes.iter().all(|b| b.is_ascii_whitespace()) {
                 continue;
             }
+
+            // ── Text-path prefix routing ──────────────────────────
+            // Meta protocol commands use two-letter prefixes (mg, ms,
+            // md, ma, mn, me) followed by a space.  Route them here
+            // for future support; classic ASCII commands fall through.
+            if is_meta_command(&line_bytes) {
+                out.extend_from_slice(b"SERVER_ERROR meta protocol not supported\r\n");
+                flush_out(sock, &mut out)?;
+                continue;
+            }
+
             let cmd = parse_command_line(&line_bytes);
 
             match cmd {
@@ -421,6 +432,23 @@ fn flush_out(sock: &mut TcpStream, out: &mut Vec<u8>) -> Br<()> {
         out.clear();
     }
     Ok(())
+}
+
+/// Check if a line is a meta protocol command.
+/// Meta commands use two-letter prefixes: mg, ms, md, ma, mn, me
+/// followed by a space (or end of line for mn/me which can be bare).
+fn is_meta_command(line: &[u8]) -> bool {
+    if line.len() < 2 {
+        return false;
+    }
+    let prefix = &line[..2];
+    let is_meta_prefix = prefix == b"mg" || prefix == b"ms" || prefix == b"md"
+        || prefix == b"ma" || prefix == b"mn" || prefix == b"me";
+    if !is_meta_prefix {
+        return false;
+    }
+    // Must be followed by space, \t, or end of line (for bare mn/me).
+    line.len() == 2 || line[2] == b' ' || line[2] == b'\t'
 }
 
 /// Does this command need a data block after the command line?
@@ -1371,5 +1399,63 @@ mod tests {
             parse_command_line(b"prepend k 0 0 5"),
             CmdParseResult::ClientError(_),
         ));
+    }
+
+    // ── is_meta_command (prefix-based text-path routing) ───────────
+
+    #[test]
+    fn meta_get_is_meta() {
+        assert!(is_meta_command(b"mg mykey"));
+    }
+
+    #[test]
+    fn meta_set_is_meta() {
+        assert!(is_meta_command(b"ms mykey 5"));
+    }
+
+    #[test]
+    fn meta_delete_is_meta() {
+        assert!(is_meta_command(b"md mykey"));
+    }
+
+    #[test]
+    fn meta_arithmetic_is_meta() {
+        assert!(is_meta_command(b"ma mykey"));
+    }
+
+    #[test]
+    fn meta_noop_bare_is_meta() {
+        assert!(is_meta_command(b"mn"));
+    }
+
+    #[test]
+    fn meta_debug_is_meta() {
+        assert!(is_meta_command(b"me mykey"));
+    }
+
+    #[test]
+    fn classic_get_not_meta() {
+        assert!(!is_meta_command(b"get foo"));
+    }
+
+    #[test]
+    fn classic_set_not_meta() {
+        assert!(!is_meta_command(b"set foo 0 0 5"));
+    }
+
+    #[test]
+    fn short_line_not_meta() {
+        assert!(!is_meta_command(b"m"));
+    }
+
+    #[test]
+    fn empty_line_not_meta() {
+        assert!(!is_meta_command(b""));
+    }
+
+    #[test]
+    fn mg_without_space_not_meta() {
+        // "mgx" is not a meta command — must be followed by space or end.
+        assert!(!is_meta_command(b"mgx foo"));
     }
 }
