@@ -15,11 +15,15 @@ Environment variables:
 import os, socket, struct, subprocess, sys, time
 
 MAGIC_REQ, MAGIC_RES, HDR = 0x80, 0x81, 24
-OP_GET, OP_SET, OP_ADD, OP_DELETE = 0x00, 0x01, 0x02, 0x04
+OP_GET, OP_SET, OP_ADD, OP_REPLACE, OP_DELETE = 0x00, 0x01, 0x02, 0x03, 0x04
 OP_INCR, OP_DECR = 0x05, 0x06
-OP_NOOP, OP_GETK = 0x0A, 0x0C
+OP_FLUSH = 0x08
+OP_NOOP, OP_VERSION, OP_GETK = 0x0A, 0x0B, 0x0C
+OP_APPEND, OP_PREPEND = 0x0E, 0x0F
 OP_SETQ, OP_ADDQ, OP_DELETEQ = 0x11, 0x12, 0x14
-ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK = 0, 1, 2, 4, 0x81
+OP_APPENDQ, OP_PREPENDQ = 0x19, 0x1A
+OP_TOUCH, OP_GAT, OP_GATQ = 0x1C, 0x1D, 0x1E
+ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK = 0, 1, 2, 4, 5, 0x81
 CAS_ZERO = 0
 HOST, PORT, TMO = "127.0.0.1", 11210, 3.0
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "16379"))
@@ -78,6 +82,9 @@ def set_extras(flags=0, expiry=0):
 
 def incr_extras(delta=1, initial=0, expiry=0):
     return struct.pack(">QQI", delta, initial, expiry)
+
+def touch_extras(expiry=0):
+    return struct.pack(">I", expiry)
 
 _TS = str(int(time.time()))
 def tkey(name):
@@ -517,6 +524,331 @@ def test_binary_value_roundtrip():
             f"GET CAS={r2['cas']}, SET CAS={set_cas}")
 
 
+# ── 13. TOUCH operation ──────────────────────────────────────────
+def test_touch():
+    """TOUCH on existing key succeeds; TOUCH on missing key → ST_NF."""
+    s = conn()
+    k = tkey("touch1")
+    # Create key
+    s.sendall(build_req(OP_SET, opaque=1100, extras=set_extras(),
+                        key=k, value=b"touchval"))
+    rd = recv_min(s, HDR)
+    r0, _ = parse_resp(rd)
+    chk("touch_set_prerequisite", r0 and r0["status"] == ST_OK, f"{r0}")
+
+    # TOUCH existing key with 10s TTL
+    s.sendall(build_req(OP_TOUCH, opaque=1101, extras=touch_extras(expiry=10),
+                        key=k))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("touch_existing_ok", r1 and r1["status"] == ST_OK,
+        f"expected ST_OK, got {r1}")
+    chk("touch_returns_cas", r1 and r1["cas"] > 0,
+        f"cas={r1 and r1['cas']}")
+
+    # Verify TTL was set via redis-cli
+    rk = redis_key(k)
+    ttl = redis_cli("TTL", rk)
+    chk("touch_sets_ttl", ttl and int(ttl) > 0,
+        f"expected TTL > 0, got {ttl}")
+
+    # TOUCH missing key → ST_NF
+    k2 = tkey("touch_miss")
+    s.sendall(build_req(OP_TOUCH, opaque=1102, extras=touch_extras(expiry=10),
+                        key=k2))
+    rd = recv_min(s, HDR)
+    r2, _ = parse_resp(rd)
+    chk("touch_missing_nf", r2 and r2["status"] == ST_NF,
+        f"expected ST_NF, got {r2}")
+    s.close()
+
+
+# ── 14. GAT (Get And Touch) ─────────────────────────────────────
+def test_gat():
+    """GAT on existing key returns value and updates TTL; miss → ST_NF."""
+    s = conn()
+    k = tkey("gat1")
+    FLAGS = 0xBEEF
+    # Create key
+    s.sendall(build_req(OP_SET, opaque=1200, extras=set_extras(flags=FLAGS),
+                        key=k, value=b"gatval"))
+    rd = recv_min(s, HDR)
+    r0, _ = parse_resp(rd)
+    chk("gat_set_prerequisite", r0 and r0["status"] == ST_OK, f"{r0}")
+
+    # GAT with 15s TTL
+    s.sendall(build_req(OP_GAT, opaque=1201, extras=touch_extras(expiry=15),
+                        key=k))
+    rd = recv_min(s, HDR + 100)
+    r1, _ = parse_resp(rd)
+    chk("gat_existing_ok", r1 and r1["status"] == ST_OK,
+        f"expected ST_OK, got {r1}")
+    if r1 and r1["status"] == ST_OK:
+        got_extras = r1["body"][:r1["extras_len"]]
+        # GAT includes key in response
+        key_start = r1["extras_len"]
+        key_end = key_start + r1["key_len"]
+        got_key = r1["body"][key_start:key_end]
+        got_val = r1["body"][key_end:]
+        got_flags = struct.unpack(">I", got_extras)[0] if len(got_extras) == 4 else None
+        chk("gat_returns_value", got_val == b"gatval",
+            f"expected b'gatval', got {got_val!r}")
+        chk("gat_returns_flags", got_flags == FLAGS,
+            f"expected 0x{FLAGS:04x}, got {got_flags}")
+        chk("gat_returns_key", got_key == k,
+            f"expected {k!r}, got {got_key!r}")
+        chk("gat_returns_cas", r1["cas"] > 0,
+            f"cas={r1['cas']}")
+
+    # Verify TTL
+    rk = redis_key(k)
+    ttl = redis_cli("TTL", rk)
+    chk("gat_updates_ttl", ttl and int(ttl) > 0,
+        f"expected TTL > 0, got {ttl}")
+
+    # GAT miss → ST_NF
+    k2 = tkey("gat_miss")
+    s.sendall(build_req(OP_GAT, opaque=1202, extras=touch_extras(expiry=10),
+                        key=k2))
+    rd = recv_min(s, HDR)
+    r2, _ = parse_resp(rd)
+    chk("gat_missing_nf", r2 and r2["status"] == ST_NF,
+        f"expected ST_NF, got {r2}")
+    s.close()
+
+
+# ── 15. APPEND / PREPEND ────────────────────────────────────────
+def test_append_prepend():
+    """APPEND/PREPEND on existing key; NOT_STORED on missing."""
+    s = conn()
+    k = tkey("ap1")
+    # Create key with initial value
+    s.sendall(build_req(OP_SET, opaque=1300, extras=set_extras(),
+                        key=k, value=b"hello"))
+    rd = recv_min(s, HDR)
+    r0, _ = parse_resp(rd)
+    chk("append_set_prerequisite", r0 and r0["status"] == ST_OK, f"{r0}")
+
+    # APPEND " world"
+    s.sendall(build_req(OP_APPEND, opaque=1301, key=k, value=b" world"))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("append_ok", r1 and r1["status"] == ST_OK,
+        f"expected ST_OK, got {r1}")
+    chk("append_returns_cas", r1 and r1["cas"] > 0,
+        f"cas={r1 and r1['cas']}")
+
+    # Verify via GET
+    s.sendall(build_req(OP_GET, opaque=1302, key=k))
+    rd = recv_min(s, HDR + 100)
+    r2, _ = parse_resp(rd)
+    if r2 and r2["status"] == ST_OK:
+        got_val = r2["body"][r2["extras_len"]:]
+        chk("append_value_correct", got_val == b"hello world",
+            f"expected b'hello world', got {got_val!r}")
+
+    # PREPEND "say "
+    s.sendall(build_req(OP_PREPEND, opaque=1303, key=k, value=b"say "))
+    rd = recv_min(s, HDR)
+    r3, _ = parse_resp(rd)
+    chk("prepend_ok", r3 and r3["status"] == ST_OK,
+        f"expected ST_OK, got {r3}")
+
+    # Verify via GET
+    s.sendall(build_req(OP_GET, opaque=1304, key=k))
+    rd = recv_min(s, HDR + 100)
+    r4, _ = parse_resp(rd)
+    if r4 and r4["status"] == ST_OK:
+        got_val = r4["body"][r4["extras_len"]:]
+        chk("prepend_value_correct", got_val == b"say hello world",
+            f"expected b'say hello world', got {got_val!r}")
+
+    # APPEND on missing key → NOT_STORED
+    k2 = tkey("ap_miss")
+    s.sendall(build_req(OP_APPEND, opaque=1305, key=k2, value=b"x"))
+    rd = recv_min(s, HDR)
+    r5, _ = parse_resp(rd)
+    chk("append_missing_not_stored",
+        r5 and r5["status"] == ST_NOT_STORED,
+        f"expected ST_NOT_STORED(5), got {r5}")
+
+    # PREPEND on missing key → NOT_STORED
+    s.sendall(build_req(OP_PREPEND, opaque=1306, key=k2, value=b"x"))
+    rd = recv_min(s, HDR)
+    r6, _ = parse_resp(rd)
+    chk("prepend_missing_not_stored",
+        r6 and r6["status"] == ST_NOT_STORED,
+        f"expected ST_NOT_STORED(5), got {r6}")
+    s.close()
+
+
+# ── 16. VERSION ──────────────────────────────────────────────────
+def test_version():
+    """VERSION returns a version string."""
+    s = conn()
+    s.sendall(build_req(OP_VERSION, opaque=1400))
+    rd = recv_min(s, HDR + 20)
+    s.close()
+    r, _ = parse_resp(rd)
+    chk("version_ok", r and r["status"] == ST_OK,
+        f"expected ST_OK, got {r}")
+    if r and r["status"] == ST_OK:
+        ver = r["body"].decode("utf-8", errors="replace")
+        chk("version_string", "RedCouch" in ver,
+            f"expected 'RedCouch' in version, got {ver!r}")
+
+
+# ── 17. Expiry behavior ─────────────────────────────────────────
+def test_expiry_set_ttl():
+    """SET with TTL → key has TTL and eventually expires."""
+    s = conn()
+
+    # Test 1: SET with long TTL to verify TTL is set (no race with redis-cli)
+    k_ttl = tkey("exp_ttl")
+    s.sendall(build_req(OP_SET, opaque=1500, extras=set_extras(expiry=300),
+                        key=k_ttl, value=b"expval_long"))
+    rd = recv_min(s, HDR)
+    r0, _ = parse_resp(rd)
+    chk("expiry_set_ok", r0 and r0["status"] == ST_OK, f"{r0}")
+
+    rk = redis_key(k_ttl)
+    ttl = redis_cli("TTL", rk)
+    chk("expiry_ttl_set", ttl and int(ttl) > 0,
+        f"expected TTL > 0, got {ttl}")
+
+    # Test 2: SET with short TTL to verify key actually expires
+    k_exp = tkey("exp_short")
+    s.sendall(build_req(OP_SET, opaque=1501, extras=set_extras(expiry=2),
+                        key=k_exp, value=b"expval_short"))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("expiry_short_set_ok", r1 and r1["status"] == ST_OK, f"{r1}")
+
+    # Immediately GET → should work
+    s.sendall(build_req(OP_GET, opaque=1502, key=k_exp))
+    rd = recv_min(s, HDR + 50)
+    r2, _ = parse_resp(rd)
+    chk("expiry_get_before", r2 and r2["status"] == ST_OK,
+        f"expected ST_OK before expiry, got {r2}")
+
+    # Wait for expiry
+    time.sleep(3)
+
+    # GET after expiry → should be NOT_FOUND
+    s.sendall(build_req(OP_GET, opaque=1503, key=k_exp))
+    rd = recv_min(s, HDR)
+    r3, _ = parse_resp(rd)
+    chk("expiry_get_after", r3 and r3["status"] == ST_NF,
+        f"expected ST_NF after expiry, got {r3}")
+    s.close()
+
+
+# ── 18. Counter edge cases ──────────────────────────────────────
+def test_counter_edge_cases():
+    """Counter: INCR on non-numeric, DECR underflow, large values."""
+    s = conn()
+
+    # INCR on non-numeric stored value → ST_ARGS (non-numeric)
+    k_nn = tkey("ctr_nn")
+    s.sendall(build_req(OP_SET, opaque=1600, extras=set_extras(),
+                        key=k_nn, value=b"notanumber"))
+    rd = recv_min(s, HDR)
+    r0, _ = parse_resp(rd)
+    chk("counter_nn_set", r0 and r0["status"] == ST_OK, f"{r0}")
+
+    s.sendall(build_req(OP_INCR, opaque=1601,
+                        extras=incr_extras(delta=1, initial=0, expiry=0),
+                        key=k_nn))
+    rd = recv_min(s, HDR + 20)
+    r1, _ = parse_resp(rd)
+    chk("counter_non_numeric_error",
+        r1 and r1["status"] == ST_ARGS,
+        f"expected ST_ARGS for non-numeric, got {r1}")
+
+    # INCR with large initial value
+    k_lg = tkey("ctr_lg")
+    large_init = 2**52  # safe within Lua double precision
+    s.sendall(build_req(OP_INCR, opaque=1602,
+                        extras=incr_extras(delta=1, initial=large_init, expiry=0),
+                        key=k_lg))
+    rd = recv_min(s, HDR + 8)
+    r2, _ = parse_resp(rd)
+    chk("counter_large_init_ok", r2 and r2["status"] == ST_OK, f"{r2}")
+    if r2 and r2["status"] == ST_OK and len(r2["body"]) == 8:
+        val = struct.unpack(">Q", r2["body"])[0]
+        chk("counter_large_init_value", val == large_init,
+            f"expected {large_init}, got {val}")
+
+    # INCR existing large value by 1
+    s.sendall(build_req(OP_INCR, opaque=1603,
+                        extras=incr_extras(delta=1, initial=0, expiry=0),
+                        key=k_lg))
+    rd = recv_min(s, HDR + 8)
+    r3, _ = parse_resp(rd)
+    if r3 and r3["status"] == ST_OK and len(r3["body"]) == 8:
+        val = struct.unpack(">Q", r3["body"])[0]
+        chk("counter_large_incr", val == large_init + 1,
+            f"expected {large_init + 1}, got {val}")
+
+    # DECR to underflow (clamp to 0)
+    k_uf = tkey("ctr_uf")
+    s.sendall(build_req(OP_INCR, opaque=1604,
+                        extras=incr_extras(delta=1, initial=5, expiry=0),
+                        key=k_uf))
+    rd = recv_min(s, HDR + 8)
+    parse_resp(rd)  # consume
+
+    s.sendall(build_req(OP_DECR, opaque=1605,
+                        extras=incr_extras(delta=10, initial=0, expiry=0),
+                        key=k_uf))
+    rd = recv_min(s, HDR + 8)
+    r4, _ = parse_resp(rd)
+    if r4 and r4["status"] == ST_OK and len(r4["body"]) == 8:
+        val = struct.unpack(">Q", r4["body"])[0]
+        chk("counter_underflow_zero", val == 0,
+            f"expected 0, got {val}")
+    s.close()
+
+
+# ── 19. FLUSH operation ─────────────────────────────────────────
+def test_flush():
+    """FLUSH deletes all rc: keys; confirms via GET miss."""
+    s = conn()
+    k1 = tkey("fl1")
+    k2 = tkey("fl2")
+
+    # Create two keys
+    s.sendall(build_req(OP_SET, opaque=1700, extras=set_extras(),
+                        key=k1, value=b"fv1"))
+    rd = recv_min(s, HDR)
+    parse_resp(rd)
+    s.sendall(build_req(OP_SET, opaque=1701, extras=set_extras(),
+                        key=k2, value=b"fv2"))
+    rd = recv_min(s, HDR)
+    parse_resp(rd)
+
+    # FLUSH
+    s.sendall(build_req(OP_FLUSH, opaque=1702))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("flush_ok", r1 and r1["status"] == ST_OK,
+        f"expected ST_OK, got {r1}")
+
+    # GET both keys → NOT_FOUND
+    s.sendall(build_req(OP_GET, opaque=1703, key=k1))
+    rd = recv_min(s, HDR)
+    r2, _ = parse_resp(rd)
+    chk("flush_key1_gone", r2 and r2["status"] == ST_NF,
+        f"expected ST_NF after flush, got {r2}")
+
+    s.sendall(build_req(OP_GET, opaque=1704, key=k2))
+    rd = recv_min(s, HDR)
+    r3, _ = parse_resp(rd)
+    chk("flush_key2_gone", r3 and r3["status"] == ST_NF,
+        f"expected ST_NF after flush, got {r3}")
+    s.close()
+
+
 # ═════════════════════════════════════════════════════════════════
 # Runner
 # ═════════════════════════════════════════════════════════════════
@@ -544,6 +876,15 @@ ALL_TESTS = [
     test_incr_decr,
     # Binary-safe data path
     test_binary_value_roundtrip,
+    # New binary semantics
+    test_touch,
+    test_gat,
+    test_append_prepend,
+    test_version,
+    test_expiry_set_ttl,
+    test_counter_edge_cases,
+    # Flush (run last — destroys data)
+    test_flush,
 ]
 
 if __name__ == "__main__":

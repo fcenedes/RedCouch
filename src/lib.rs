@@ -18,7 +18,7 @@ use bytes::{Buf, BytesMut};
 use protocol::{
     Opcode, Request, try_parse_request, ParseResult,
     write_response, write_simple_response, write_error_for_raw_opcode,
-    ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK,
+    ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK,
     CAS_ZERO,
 };
 #[cfg(not(test))]
@@ -165,13 +165,21 @@ redis.call('DEL', KEYS[1])
 return 0
 "#;
 
-/// Lua script for INCR/DECR with proper u64 semantics.
+/// Lua script for INCR/DECR with u64 semantics.
 ///
 /// KEYS[1] = item key, KEYS[2] = CAS counter key
 /// ARGV[1] = delta (decimal string)
 /// ARGV[2] = is_decrement ("0"|"1")
 /// ARGV[3] = initial value (decimal string)
 /// ARGV[4] = expiry (decimal string)
+///
+/// Precision note: Lua 5.1 (embedded in Redis) uses IEEE 754 double-precision
+/// floats, so integers above 2^53 (9007199254740992) lose precision.  Counter
+/// values within [0, 2^53) are exact.  Values at or above 2^53 may round;
+/// the module does NOT attempt string-based big-integer math in Lua because
+/// the performance and complexity tradeoffs are not justified for GA.
+/// Overflow past the Lua precision boundary wraps modulo the double
+/// representation.  Underflow on DECR clamps to 0.
 ///
 /// Returns: {status, value_string, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND, -3=NON_NUMERIC
@@ -205,6 +213,104 @@ local new_cas = redis.call('INCR', KEYS[2])
 redis.call('HSET', KEYS[1], 'v', str_val, 'c', tostring(new_cas))
 return {0, str_val, tostring(new_cas)}
 "#;
+
+/// Lua script for TOUCH — update expiry on an existing key.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = expiry (decimal string)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+#[cfg(not(test))]
+const LUA_TOUCH: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, ''} end
+local exp = tonumber(ARGV[1])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 then
+  redis.call('PERSIST', KEYS[1])
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for GAT (Get And Touch) — fetch value and update expiry atomically.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = expiry (decimal string)
+///
+/// Returns: {status, hex_value, flags_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+#[cfg(not(test))]
+const LUA_GAT: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
+local exp = tonumber(ARGV[1])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 then
+  redis.call('PERSIST', KEYS[1])
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'c', tostring(new_cas))
+local v = redis.call('HGET', KEYS[1], 'v')
+local f = redis.call('HGET', KEYS[1], 'f')
+if v == false then v = '' end
+if f == false then f = '0' end
+local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
+return {0, hex, f, tostring(new_cas)}
+"#;
+
+/// Lua script for APPEND — append data to existing value.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = data to append
+/// ARGV[2] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_APPEND: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
+local req_cas = ARGV[2]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local old_v = redis.call('HGET', KEYS[1], 'v')
+if old_v == false then old_v = '' end
+local new_v = old_v .. ARGV[1]
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', new_v, 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for PREPEND — prepend data to existing value.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = data to prepend
+/// ARGV[2] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: {status, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_PREPEND: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
+local req_cas = ARGV[2]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local old_v = redis.call('HGET', KEYS[1], 'v')
+if old_v == false then old_v = '' end
+local new_v = ARGV[1] .. old_v
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', new_v, 'c', tostring(new_cas))
+return {0, tostring(new_cas)}
+"#;
+
 
 /* ============================================================
    TCP listener (started once from module_init)
@@ -319,6 +425,11 @@ fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         Set | Add | Replace => op_store(req, sock),
         Delete => op_delete(req, sock),
         Increment | Decrement => op_counter(req, sock),
+        Touch => op_touch(req, sock),
+        GAT => op_gat(req, sock),
+        Append | Prepend => op_append_prepend(req, sock),
+        Flush => op_flush(req, sock),
+        Version => op_version(req, sock),
         Noop => {
             write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
             Ok(())
@@ -661,6 +772,241 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     }
     Ok(())
 }
+
+/* ------------- TOUCH ------------- */
+#[cfg(not(test))]
+fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+
+    if req.extras.len() != 4 {
+        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let expiry = BigEndian::read_u32(&req.extras[0..4]);
+    let rk = make_redis_key(req.key);
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_TOUCH.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL touch error: {reply:?}")));
+    }
+
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL touch unexpected: {reply:?}")));
+        }
+    };
+
+    match status_code {
+        0 => {
+            if !opcode.is_quiet() {
+                write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+            }
+        }
+        -1 => {
+            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL touch unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- GAT (Get And Touch) ------------- */
+#[cfg(not(test))]
+fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+
+    if req.extras.len() != 4 {
+        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let expiry = BigEndian::read_u32(&req.extras[0..4]);
+    let rk = make_redis_key(req.key);
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_GAT.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL gat error: {reply:?}")));
+    }
+
+    let fields = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 4 => arr,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL gat unexpected: {reply:?}")));
+        }
+    };
+
+    let status_code = eval_int(&fields[0]);
+    if status_code == -1 {
+        if opcode.is_quiet() {
+            return Ok(());
+        }
+        write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let hex_str = eval_str(&fields[1]);
+    let value_bytes = hex_decode(&hex_str);
+    let flags: u32 = eval_str(&fields[2]).parse().unwrap_or(0);
+    let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
+
+    let extras = flags.to_be_bytes();
+    let key_part = if opcode.includes_key() {
+        req.key
+    } else {
+        &[]
+    };
+
+    write_response(
+        sock, opcode, ST_OK, req.hdr.opaque, cas,
+        &extras, key_part, &value_bytes,
+    )?;
+    Ok(())
+}
+
+/* ------------- APPEND / PREPEND ------------- */
+#[cfg(not(test))]
+fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+
+    // Append/Prepend: no extras expected, key + value in body.
+    if !req.extras.is_empty() {
+        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    let rk = make_redis_key(req.key);
+    let req_cas = req.hdr.cas.to_string();
+
+    let lua_script = if base == Opcode::Append { LUA_APPEND } else { LUA_PREPEND };
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            lua_script.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            req.value,
+            req_cas.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL append/prepend error: {reply:?}")));
+    }
+
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL append/prepend unexpected: {reply:?}")));
+        }
+    };
+
+    match status_code {
+        0 => {
+            if !opcode.is_quiet() {
+                write_response(
+                    sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                )?;
+            }
+        }
+        -5 => {
+            // NOT_STORED — key does not exist
+            write_simple_response(sock, opcode, ST_NOT_STORED, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // CAS mismatch
+            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL append/prepend unknown status: {status_code}")));
+        }
+    }
+    Ok(())
+}
+
+/* ------------- FLUSH ------------- */
+#[cfg(not(test))]
+fn op_flush(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+
+    // Flush deletes all rc: prefixed keys.
+    // Use SCAN + DEL pattern to avoid blocking on large keyspaces.
+    with_ctx(|ctx| {
+        // Use Lua to scan and delete all rc:* keys atomically.
+        let lua = r#"
+local cursor = '0'
+local count = 0
+repeat
+  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 100)
+  cursor = result[1]
+  local keys = result[2]
+  if #keys > 0 then
+    for i, key in ipairs(keys) do
+      redis.call('DEL', key)
+      count = count + 1
+    end
+  end
+until cursor == '0'
+return count
+"#;
+        let args: &[&[u8]] = &[lua.as_bytes(), b"0"];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if !opcode.is_quiet() {
+        write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+    }
+    Ok(())
+}
+
+/* ------------- VERSION ------------- */
+#[cfg(not(test))]
+fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let version = b"RedCouch 0.1.0";
+    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, version)?;
+    Ok(())
+}
+
+
 
 /* ============================================================
    Module declaration  (allocator + init)

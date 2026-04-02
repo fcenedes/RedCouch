@@ -36,10 +36,14 @@ pub enum Opcode {
     Increment = 0x05,
     Decrement = 0x06,
     Quit = 0x07,
+    Flush = 0x08,
     GetQ = 0x09,
     Noop = 0x0a,
+    Version = 0x0b,
     GetK = 0x0c,
     GetKQ = 0x0d,
+    Append = 0x0e,
+    Prepend = 0x0f,
     SetQ = 0x11,
     AddQ = 0x12,
     ReplaceQ = 0x13,
@@ -47,6 +51,12 @@ pub enum Opcode {
     IncrementQ = 0x15,
     DecrementQ = 0x16,
     QuitQ = 0x17,
+    FlushQ = 0x18,
+    AppendQ = 0x19,
+    PrependQ = 0x1a,
+    Touch = 0x1c,
+    GAT = 0x1d,
+    GATQ = 0x1e,
 }
 
 impl Opcode {
@@ -61,10 +71,14 @@ impl Opcode {
             0x05 => Increment,
             0x06 => Decrement,
             0x07 => Quit,
+            0x08 => Flush,
             0x09 => GetQ,
             0x0a => Noop,
+            0x0b => Version,
             0x0c => GetK,
             0x0d => GetKQ,
+            0x0e => Append,
+            0x0f => Prepend,
             0x11 => SetQ,
             0x12 => AddQ,
             0x13 => ReplaceQ,
@@ -72,6 +86,12 @@ impl Opcode {
             0x15 => IncrementQ,
             0x16 => DecrementQ,
             0x17 => QuitQ,
+            0x18 => FlushQ,
+            0x19 => AppendQ,
+            0x1a => PrependQ,
+            0x1c => Touch,
+            0x1d => GAT,
+            0x1e => GATQ,
             _ => return None,
         })
     }
@@ -84,13 +104,14 @@ impl Opcode {
         matches!(
             self,
             GetQ | GetKQ | SetQ | AddQ | ReplaceQ | DeleteQ
-                | IncrementQ | DecrementQ | QuitQ
+                | IncrementQ | DecrementQ | QuitQ | FlushQ
+                | AppendQ | PrependQ | GATQ
         )
     }
 
-    /// Returns `true` for GETK/GETKQ which echo the key in the response.
+    /// Returns `true` for GETK/GETKQ/GAT/GATQ which echo the key in the response.
     pub fn includes_key(self) -> bool {
-        matches!(self, Opcode::GetK | Opcode::GetKQ)
+        matches!(self, Opcode::GetK | Opcode::GetKQ | Opcode::GAT | Opcode::GATQ)
     }
 
     /// Returns the "loud" base opcode for a quiet variant, or self if
@@ -106,8 +127,12 @@ impl Opcode {
             IncrementQ => Increment,
             DecrementQ => Decrement,
             QuitQ => Quit,
+            FlushQ => Flush,
             GetQ => Get,
             GetKQ => GetK,
+            AppendQ => Append,
+            PrependQ => Prepend,
+            GATQ => GAT,
             other => other,
         }
     }
@@ -358,10 +383,14 @@ mod tests {
             (0x05, Opcode::Increment),
             (0x06, Opcode::Decrement),
             (0x07, Opcode::Quit),
+            (0x08, Opcode::Flush),
             (0x09, Opcode::GetQ),
             (0x0a, Opcode::Noop),
+            (0x0b, Opcode::Version),
             (0x0c, Opcode::GetK),
             (0x0d, Opcode::GetKQ),
+            (0x0e, Opcode::Append),
+            (0x0f, Opcode::Prepend),
             (0x11, Opcode::SetQ),
             (0x12, Opcode::AddQ),
             (0x13, Opcode::ReplaceQ),
@@ -369,6 +398,12 @@ mod tests {
             (0x15, Opcode::IncrementQ),
             (0x16, Opcode::DecrementQ),
             (0x17, Opcode::QuitQ),
+            (0x18, Opcode::FlushQ),
+            (0x19, Opcode::AppendQ),
+            (0x1a, Opcode::PrependQ),
+            (0x1c, Opcode::Touch),
+            (0x1d, Opcode::GAT),
+            (0x1e, Opcode::GATQ),
         ] {
             assert_eq!(Opcode::parse(byte), Some(expected));
             assert_eq!(expected as u8, byte);
@@ -392,11 +427,20 @@ mod tests {
         assert!(Opcode::IncrementQ.is_quiet());
         assert!(Opcode::DecrementQ.is_quiet());
         assert!(Opcode::QuitQ.is_quiet());
+        assert!(Opcode::FlushQ.is_quiet());
+        assert!(Opcode::AppendQ.is_quiet());
+        assert!(Opcode::PrependQ.is_quiet());
+        assert!(Opcode::GATQ.is_quiet());
         assert!(!Opcode::Get.is_quiet());
         assert!(!Opcode::Set.is_quiet());
+        assert!(!Opcode::Touch.is_quiet());
+        assert!(!Opcode::Append.is_quiet());
         assert!(Opcode::GetK.includes_key());
         assert!(Opcode::GetKQ.includes_key());
+        assert!(Opcode::GAT.includes_key());
+        assert!(Opcode::GATQ.includes_key());
         assert!(!Opcode::Get.includes_key());
+        assert!(!Opcode::Touch.includes_key());
     }
 
     #[test]
@@ -408,8 +452,14 @@ mod tests {
         assert_eq!(Opcode::IncrementQ.base(), Opcode::Increment);
         assert_eq!(Opcode::DecrementQ.base(), Opcode::Decrement);
         assert_eq!(Opcode::QuitQ.base(), Opcode::Quit);
+        assert_eq!(Opcode::FlushQ.base(), Opcode::Flush);
+        assert_eq!(Opcode::AppendQ.base(), Opcode::Append);
+        assert_eq!(Opcode::PrependQ.base(), Opcode::Prepend);
+        assert_eq!(Opcode::GATQ.base(), Opcode::GAT);
         assert_eq!(Opcode::Get.base(), Opcode::Get);
         assert_eq!(Opcode::Noop.base(), Opcode::Noop);
+        assert_eq!(Opcode::Touch.base(), Opcode::Touch);
+        assert_eq!(Opcode::GAT.base(), Opcode::GAT);
     }
 
     #[test]
