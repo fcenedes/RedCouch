@@ -54,6 +54,19 @@ See [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) for the full GA release documenta
 - **Binary-safe values**: full binary round-trip via Lua hex encode/decode
 - **Safe defaults**: loopback-only bind, 1024 connection limit, 30s read / 10s write timeouts, 20 MiB frame cap
 
+## Platform Support
+
+Release artifacts are built for the following targets:
+
+| Target | OS | Architecture | Artifact |
+|--------|----|--------------| ---------|
+| `x86_64-unknown-linux-gnu` | Linux | x86_64 | `libred_couch.so` |
+| `aarch64-unknown-linux-gnu` | Linux | ARM64 | `libred_couch.so` |
+| `x86_64-apple-darwin` | macOS | x86_64 | `libred_couch.dylib` |
+| `aarch64-apple-darwin` | macOS | ARM64 | `libred_couch.dylib` |
+
+**Windows** is not a supported runtime target. Redis modules require a POSIX-compatible environment; Windows is not supported by the Redis module API for production deployment.
+
 ## License
 
-Use at your own risk.
+MIT — see [LICENSE](LICENSE) for details.
