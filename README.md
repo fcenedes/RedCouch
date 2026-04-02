@@ -45,7 +45,14 @@ GET, GETQ, GETK, GETKQ, SET, SETQ, ADD, ADDQ, REPLACE, REPLACEQ, DELETE, DELETEQ
 
 ## Documentation
 
-See [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) for the full GA release documentation including feature/compatibility table, operating envelope, known limitations, configuration reference, benchmark baselines, and release checklist.
+| Document | Description |
+|---|---|
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Protocol compatibility reference — binary, ASCII, and meta command tables with supported/unsupported behaviors |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Architecture overview — module structure, threading model, storage design, data flow |
+| [`docs/EXAMPLES.md`](docs/EXAMPLES.md) | Usage examples and tutorials — ASCII, meta, and binary protocol walkthroughs |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Installation guide — building from source, GitHub Releases, loading into Redis, troubleshooting |
+| [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) | GA release documentation — full feature matrix, operating envelope, benchmark baselines, known limitations, release checklist |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributing guide — development workflow, coding standards, PR process |
 
 ## Key Design Points
 
