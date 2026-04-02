@@ -160,7 +160,7 @@ The following are **explicitly not in GA scope**:
 - UDP transport
 - Couchbase bucket/vbucket management
 - Dynamic STAT groups (settings, items, slabs, conns)
-- CI/CD pipeline (no workflows in repo)
+- CI/CD pipeline enhancements beyond ci.yml and release.yml
 
 
 ---
@@ -203,7 +203,7 @@ The module registers as `redcouch` and starts a TCP listener on `127.0.0.1:11210
 # Build check
 cargo check
 
-# Run unit/protocol tests (143 tests — 60 binary + 58 ASCII + 25 meta)
+# Run unit/protocol tests (146 tests — 60 binary + 58 ASCII + 28 meta)
 cargo test
 
 # Run E2E integration tests (requires running Redis 8+ with module loaded)
@@ -239,7 +239,7 @@ cd benchmarks && bash run_stress_soak.sh
 |---|---|---|
 | Binary protocol unit tests | 60 | `src/protocol.rs` (via `cargo test`) |
 | ASCII protocol unit tests | 58 | `src/ascii.rs` (via `cargo test`) — 47 parser + 11 meta prefix routing |
-| Meta protocol unit tests | 25 | `src/meta.rs` (via `cargo test`) — parser, flag validation, mode validation, numeric token validation |
+| Meta protocol unit tests | 28 | `src/meta.rs` (via `cargo test`) — parser, flag validation, mode validation, numeric token validation, bare-flag rejection |
 | Integration/E2E tests | Suite | `tests/integration/test_binary_protocol.py` |
 | Benchmark workloads | 10+ profiles | `benchmarks/bench_binary_protocol.py` |
 | Stress/soak workloads | 7 phases | `benchmarks/stress_soak_validation.py` |
@@ -269,7 +269,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ### Testing
 
-- [x] **Unit tests pass**: `cargo test` — 143 tests (60 binary + 58 ASCII + 25 meta), 0 failures
+- [x] **Unit tests pass**: `cargo test` — 146 tests (60 binary + 58 ASCII + 28 meta), 0 failures
 - [x] **E2E integration suite**: live Redis 8.4.0 binary-client verification
 - [x] **Benchmark baseline captured**: artifact with provenance tag `verifier-wave9b`
 - [x] **Stress/soak validation**: 7-phase suite, 0 errors, stable memory, clean malformed handling

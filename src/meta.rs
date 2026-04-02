@@ -96,11 +96,17 @@ pub(crate) fn validate_ms_flags(flags: &[MetaFlag]) -> Result<(), String> {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
+    // M requires a token; bare M is rejected.
+    validate_mode_token_present(flags)?;
     // Validate M mode token: only S, E, A, P, R allowed.
     if let Some(mode) = get_flag_token(flags, b'M') {
         match mode {
             "S" | "E" | "A" | "P" | "R" => {}
             _ => return Err(format!("unsupported ms mode '{mode}'")),
+        }
+        // Append/Prepend don't support F (client flags) or T (TTL).
+        if (mode == "A" || mode == "P") && (has_flag(flags, b'F') || has_flag(flags, b'T')) {
+            return Err(format!("flags F/T not supported with ms mode '{mode}'"));
         }
     }
     validate_numeric_tokens(flags, b"FTC")?;
@@ -125,6 +131,8 @@ pub(crate) fn validate_ma_flags(flags: &[MetaFlag]) -> Result<(), String> {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
+    // M requires a token; bare M is rejected.
+    validate_mode_token_present(flags)?;
     // Validate M mode token: only I, D allowed.
     if let Some(mode) = get_flag_token(flags, b'M') {
         match mode {
@@ -156,20 +164,37 @@ pub(crate) fn validate_me_flags(flags: &[MetaFlag]) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate that flag tokens expected to be numeric are actually valid unsigned integers.
-/// `numeric_flags` lists the flag characters that require numeric tokens.
+/// Validate that flag tokens expected to be numeric have a valid unsigned integer token.
+/// Bare flags (no token) are rejected — numeric flags require an explicit value.
 fn validate_numeric_tokens(flags: &[MetaFlag], numeric_flags: &[u8]) -> Result<(), String> {
     for f in flags {
         if numeric_flags.contains(&f.ch) {
-            if let Some(ref tok) = f.token {
-                if tok.parse::<u64>().is_err() {
+            match &f.token {
+                Some(tok) => {
+                    if tok.parse::<u64>().is_err() {
+                        return Err(format!(
+                            "bad numeric value '{}' for flag '{}'",
+                            tok, f.ch as char
+                        ));
+                    }
+                }
+                None => {
                     return Err(format!(
-                        "bad numeric value '{}' for flag '{}'",
-                        tok, f.ch as char
+                        "flag '{}' requires a numeric token",
+                        f.ch as char
                     ));
                 }
             }
-            // A flag like 'F' without a token is valid (means 0 or default).
+        }
+    }
+    Ok(())
+}
+
+/// Validate that an M (mode) flag has an explicit token. Bare M is rejected.
+fn validate_mode_token_present(flags: &[MetaFlag]) -> Result<(), String> {
+    for f in flags {
+        if f.ch == b'M' && f.token.is_none() {
+            return Err("flag 'M' requires a mode token".to_string());
         }
     }
     Ok(())
@@ -450,6 +475,55 @@ mod tests {
     fn flag_validation_mg_rejects_bad_ttl() {
         let bad = parse_meta_flags(&["Tabc"]).unwrap();
         assert!(validate_mg_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn reject_bare_numeric_flags() {
+        // Bare T (no token) must be rejected.
+        let bad = parse_meta_flags(&["T"]).unwrap();
+        assert!(validate_mg_flags(&bad).is_err());
+
+        // Bare F on ms must be rejected.
+        let bad = parse_meta_flags(&["F", "MS"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+
+        // Bare C on md must be rejected.
+        let bad = parse_meta_flags(&["C"]).unwrap();
+        assert!(validate_md_flags(&bad).is_err());
+
+        // Bare D on ma must be rejected.
+        let bad = parse_meta_flags(&["D", "MI"]).unwrap();
+        assert!(validate_ma_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn reject_bare_m_flag() {
+        // Bare M (no mode token) on ms must be rejected.
+        let bad = parse_meta_flags(&["M"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+
+        // Bare M on ma must be rejected.
+        let bad = parse_meta_flags(&["M"]).unwrap();
+        assert!(validate_ma_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn reject_ft_on_ms_append_prepend() {
+        // F on ms M=A must be rejected.
+        let bad = parse_meta_flags(&["MA", "F123"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+
+        // T on ms M=P must be rejected.
+        let bad = parse_meta_flags(&["MP", "T300"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+
+        // Both F and T on ms M=A must be rejected.
+        let bad = parse_meta_flags(&["MA", "F0", "T0"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+
+        // But F and T on ms M=S is fine.
+        let ok = parse_meta_flags(&["MS", "F0", "T0"]).unwrap();
+        assert!(validate_ms_flags(&ok).is_ok());
     }
 
     #[test]

@@ -29,7 +29,7 @@ The module starts a TCP listener on `127.0.0.1:11210` accepting both memcached b
 ## Test
 
 ```bash
-# Unit and protocol tests (143 tests — binary, ASCII, meta)
+# Unit and protocol tests (146 tests — binary, ASCII, meta)
 cargo test
 
 # Integration tests (requires Redis 8+ with module loaded)
