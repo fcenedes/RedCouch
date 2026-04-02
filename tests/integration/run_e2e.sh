@@ -99,24 +99,20 @@ if ! kill -0 "$REDIS_PID" 2>/dev/null; then
     exit 1
 fi
 
-# ── Preflight: check JSON command availability ──────────────────
+# ── Preflight: verify Redis is responding ────────────────────────
 echo ""
-echo "Checking JSON command availability..."
-JSON_OK=0
-JSON_RESULT=$(redis-cli -p "$REDIS_PORT" JSON.SET _redcouch_probe '$' '"probe"' 2>&1)
-if echo "$JSON_RESULT" | grep -q "OK"; then
-    redis-cli -p "$REDIS_PORT" DEL _redcouch_probe >/dev/null 2>&1
-    JSON_OK=1
-    echo "  ✅ JSON commands available"
+echo "Verifying Redis connectivity..."
+PING_RESULT=$(redis-cli -p "$REDIS_PORT" PING 2>&1)
+if echo "$PING_RESULT" | grep -q "PONG"; then
+    echo "  ✅ Redis responding"
 else
-    echo "  ⚠  JSON commands NOT available: $JSON_RESULT"
-    echo "     The module's data path uses JSON.SET/JSON.GET."
-    echo "     Data-path tests will document this as a missing-dependency gap."
+    echo "  ❌ Redis not responding: $PING_RESULT"
+    cat "$REDIS_DIR/redis.log"
+    exit 1
 fi
-export REDCOUCH_JSON_AVAILABLE=$JSON_OK
 
 echo ""
-echo "Running tests..."
+echo "Running tests (hash-per-item data model, no JSON dependency)..."
 echo ""
 
 # Run the Python test suite, passing Redis port for optional direct checks

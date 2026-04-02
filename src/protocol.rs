@@ -18,12 +18,11 @@ pub const ST_NOT_STORED: u16 = 0x0005;
 pub const ST_UNK: u16 = 0x0081;
 
 // ── CAS policy ──────────────────────────────────────────────────────
-// GA CAS decision: CAS is not yet tracked per-item.  Success responses
-// return CAS_PLACEHOLDER (1) so clients see a non-zero value; error and
-// control responses return CAS_ZERO.  This is an intentional simplification
-// documented in the GA scope.
+// CAS is now tracked per-item via a Redis-backed monotonic counter
+// (`redcouch:sys:cas_counter`).  Every mutation generates a new CAS
+// value from this counter and stores it in the item's hash field `c`.
+// Error and control responses return CAS_ZERO (0).
 pub const CAS_ZERO: u64 = 0;
-pub const CAS_PLACEHOLDER: u64 = 1;
 
 // ── Opcodes ──────────────────────────────────────────────────────────
 #[repr(u8)]

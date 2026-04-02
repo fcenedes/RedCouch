@@ -1,8 +1,9 @@
-//! cbbridge – Redis module that lets Couchbase / Memcached
-//!            binary-protocol clients talk to RedisJSON.
+//! RedCouch – Redis module that bridges Couchbase / Memcached
+//!            binary-protocol clients to Redis using a hash-per-item
+//!            data model.
 //!
 //! Build :  cargo build --release
-//! Run   :  redis-stack-server --loadmodule ./target/release/libcbbridge.so
+//! Run   :  redis-server --loadmodule ./target/release/libred_couch.dylib
 
 #![forbid(unsafe_code)]
 #![allow(clippy::needless_return)]
@@ -18,7 +19,7 @@ use protocol::{
     Opcode, Request, try_parse_request, ParseResult,
     write_response, write_simple_response, write_error_for_raw_opcode,
     ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK,
-    CAS_ZERO, CAS_PLACEHOLDER,
+    CAS_ZERO,
 };
 #[cfg(not(test))]
 use std::{
@@ -33,9 +34,147 @@ use std::{
 // not during `cargo test`.
 #[cfg(not(test))]
 use redis_module::{
-    DetachedFromClient, redis_module, Context, RedisError, RedisString,
+    DetachedFromClient, redis_module, Context, RedisString,
     RedisValue, Status, ThreadSafeContext,
 };
+
+/* ============================================================
+   Key namespace and system keys
+   ========================================================= */
+
+/// Prefix for user item keys in Redis.  Client key `foo` maps to
+/// Redis key `rc:foo`.
+#[cfg(not(test))]
+const KEY_PREFIX: &[u8] = b"rc:";
+
+/// Redis key for the monotonic CAS counter.
+#[cfg(not(test))]
+const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
+
+/// Build the namespaced Redis key for a client key.
+#[cfg(not(test))]
+fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
+    let mut rk = Vec::with_capacity(KEY_PREFIX.len() + client_key.len());
+    rk.extend_from_slice(KEY_PREFIX);
+    rk.extend_from_slice(client_key);
+    rk
+}
+
+/* ============================================================
+   Lua scripts for atomic operations
+   ========================================================= */
+
+/// Lua script for SET/ADD/REPLACE with atomic CAS check.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = op ("set"|"add"|"replace")
+/// ARGV[2] = value bytes
+/// ARGV[3] = flags (decimal string)
+/// ARGV[4] = request CAS (decimal string, "0" = skip check)
+/// ARGV[5] = expiry (decimal string)
+///
+/// Returns: {status, new_cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS
+#[cfg(not(test))]
+const LUA_STORE: &str = r#"
+local op = ARGV[1]
+local exists = redis.call('EXISTS', KEYS[1])
+if op == 'add' and exists == 1 then return {-2, ''} end
+if op == 'replace' and exists == 0 then return {-1, ''} end
+local req_cas = ARGV[4]
+if req_cas ~= '0' then
+  if exists == 0 then return {-1, ''} end
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return {-2, ''} end
+end
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', ARGV[2], 'f', ARGV[3], 'c', tostring(new_cas))
+local exp = tonumber(ARGV[5])
+if exp ~= nil and exp > 0 then
+  if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+  else redis.call('EXPIREAT', KEYS[1], exp) end
+elseif exp == 0 and exists == 1 then
+  redis.call('PERSIST', KEYS[1])
+end
+return {0, tostring(new_cas)}
+"#;
+
+/// Lua script for GET — returns value, flags, CAS as an array.
+///
+/// KEYS[1] = item key
+///
+/// Returns: {status, value, flags_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND
+#[cfg(not(test))]
+const LUA_GET: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
+local v = redis.call('HGET', KEYS[1], 'v')
+local f = redis.call('HGET', KEYS[1], 'f')
+local c = redis.call('HGET', KEYS[1], 'c')
+if v == false then v = '' end
+if f == false then f = '0' end
+if c == false then c = '0' end
+return {0, v, f, c}
+"#;
+
+/// Lua script for DELETE with CAS check.
+///
+/// KEYS[1] = item key
+/// ARGV[1] = request CAS (decimal string, "0" = skip check)
+///
+/// Returns: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
+#[cfg(not(test))]
+const LUA_DELETE: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local req_cas = ARGV[1]
+if req_cas ~= '0' then
+  local stored_cas = redis.call('HGET', KEYS[1], 'c')
+  if stored_cas ~= req_cas then return -2 end
+end
+redis.call('DEL', KEYS[1])
+return 0
+"#;
+
+/// Lua script for INCR/DECR with proper u64 semantics.
+///
+/// KEYS[1] = item key, KEYS[2] = CAS counter key
+/// ARGV[1] = delta (decimal string)
+/// ARGV[2] = is_decrement ("0"|"1")
+/// ARGV[3] = initial value (decimal string)
+/// ARGV[4] = expiry (decimal string)
+///
+/// Returns: {status, value_string, cas_string}
+///   status: 0=OK, -1=NOT_FOUND, -3=NON_NUMERIC
+#[cfg(not(test))]
+const LUA_COUNTER: &str = r#"
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 0 then
+  local exp = tonumber(ARGV[4])
+  if exp == 4294967295 then return {-1, '', ''} end
+  local new_cas = redis.call('INCR', KEYS[2])
+  local init = ARGV[3]
+  redis.call('HSET', KEYS[1], 'v', init, 'f', '0', 'c', tostring(new_cas))
+  if exp ~= nil and exp > 0 then
+    if exp <= 2592000 then redis.call('EXPIRE', KEYS[1], exp)
+    else redis.call('EXPIREAT', KEYS[1], exp) end
+  end
+  return {0, init, tostring(new_cas)}
+end
+local val = redis.call('HGET', KEYS[1], 'v')
+local num = tonumber(val)
+if num == nil then return {-3, '', ''} end
+local delta = tonumber(ARGV[1])
+if ARGV[2] == '1' then
+  if num < delta then num = 0 else num = num - delta end
+else
+  num = num + delta
+end
+if num < 0 then num = 0 end
+local str_val = string.format('%.0f', num)
+local new_cas = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'v', str_val, 'c', tostring(new_cas))
+return {0, str_val, tostring(new_cas)}
+"#;
 
 /* ============================================================
    TCP listener (started once from module_init)
@@ -50,7 +189,7 @@ fn spawn_listener() {
         let listener =
             TcpListener::bind("0.0.0.0:11210").expect("bind :11210 (binary protocol)");
         listener.set_nonblocking(true).ok();
-        eprintln!("[cbbridge] listening on 11210");
+        eprintln!("[redcouch] listening on 11210");
 
         for stream in listener.incoming() {
             match stream {
@@ -58,7 +197,7 @@ fn spawn_listener() {
                     sock.set_nodelay(true).ok();
                     thread::spawn(move || {
                         if let Err(e) = handle_conn(&mut sock) {
-                            eprintln!("[cbbridge] connection error: {e}");
+                            eprintln!("[redcouch] connection error: {e}");
                         }
                     });
                 }
@@ -66,7 +205,7 @@ fn spawn_listener() {
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(e) => {
-                    eprintln!("[cbbridge] accept error: {e}");
+                    eprintln!("[redcouch] accept error: {e}");
                     break;
                 }
             }
@@ -83,8 +222,6 @@ fn spawn_listener() {
 enum BridgeErr {
     #[error("io {0}")]
     Io(#[from] std::io::Error),
-    #[error("utf8")]
-    Utf8(#[from] std::str::Utf8Error),
     #[error("redis {0}")]
     Redis(String),
 }
@@ -112,11 +249,11 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
                 }
                 ParseResult::Incomplete => break,
                 ParseResult::BadMagic => {
-                    eprintln!("[cbbridge] bad magic byte, closing connection");
+                    eprintln!("[redcouch] bad magic byte, closing connection");
                     return Ok(());
                 }
                 ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
-                    eprintln!("[cbbridge] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
+                    eprintln!("[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
                     write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
                     buf.advance(bytes_to_skip);
                 }
@@ -182,29 +319,85 @@ fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
     f(&guard)
 }
 
+/// Helper to check if a RedisValue represents an error (including the
+/// `Ok(RedisValue::StaticError(...))` pattern from redis-module 2.0.7
+/// when `RedisModule_Call` returns NULL).
+#[cfg(not(test))]
+fn is_redis_error(v: &RedisValue) -> bool {
+    matches!(v, RedisValue::StaticError(_))
+}
+
+/// Extract an integer from a Redis EVAL array result element.
+#[cfg(not(test))]
+fn eval_int(v: &RedisValue) -> i64 {
+    match v {
+        RedisValue::Integer(n) => *n,
+        _ => 0,
+    }
+}
+
+/// Extract a bulk string from a Redis EVAL array result element.
+#[cfg(not(test))]
+fn eval_str(v: &RedisValue) -> String {
+    match v {
+        RedisValue::BulkString(s) => s.clone(),
+        RedisValue::BulkRedisString(s) => s.to_string_lossy(),
+        RedisValue::SimpleString(s) => s.clone(),
+        RedisValue::SimpleStringStatic(s) => (*s).to_string(),
+        _ => String::new(),
+    }
+}
+
 /* ------------ GET / GETQ / GETK / GETKQ ------------ */
 #[cfg(not(test))]
 fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
-    // Safety: callers only reach here when opcode is Some.
     let opcode = req.hdr.opcode.unwrap();
-    let key = std::str::from_utf8(req.key)?;
-    let reply = with_ctx(|ctx| ctx.call("JSON.GET", &[key]))
-        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    let rk = make_redis_key(req.key);
 
-    if matches!(reply, RedisValue::Null) {
-        if opcode.is_quiet() {
-            // Quiet GET variants suppress miss responses.
-            return Ok(());
-        } else {
-            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
-            return Ok(());
-        }
+    // Use Lua script to atomically fetch value, flags, CAS.
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[LUA_GET.as_bytes(), b"1", rk.as_slice()];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL get error: {reply:?}")));
     }
 
-    let json: String =
-        reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
+    // Parse result: {status, value, flags_string, cas_string}
+    let fields = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 4 => arr,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL get unexpected: {reply:?}")));
+        }
+    };
 
-    let extras = 0u32.to_be_bytes();
+    let status_code = eval_int(&fields[0]);
+    if status_code == -1 {
+        // NOT_FOUND
+        if opcode.is_quiet() {
+            return Ok(());
+        }
+        write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        return Ok(());
+    }
+
+    // Extract value (as raw bytes), flags, CAS.
+    let value_bytes: Vec<u8> = match &fields[1] {
+        RedisValue::BulkString(s) => s.as_bytes().to_vec(),
+        RedisValue::BulkRedisString(s) => s.as_slice().to_vec(),
+        RedisValue::SimpleString(s) => s.as_bytes().to_vec(),
+        RedisValue::SimpleStringStatic(s) => s.as_bytes().to_vec(),
+        other => {
+            eprintln!("[redcouch] GET value field unexpected type: {other:?}");
+            Vec::new()
+        }
+    };
+
+    let flags: u32 = eval_str(&fields[2]).parse().unwrap_or(0);
+    let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
+
+    let extras = flags.to_be_bytes();
     let key_part = if opcode.includes_key() {
         req.key
     } else {
@@ -212,14 +405,8 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     };
 
     write_response(
-        sock,
-        opcode,
-        ST_OK,
-        req.hdr.opaque,
-        CAS_PLACEHOLDER,
-        &extras,
-        key_part,
-        json.as_bytes(),
+        sock, opcode, ST_OK, req.hdr.opaque, cas,
+        &extras, key_part, &value_bytes,
     )?;
     Ok(())
 }
@@ -231,45 +418,78 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let base = opcode.base();
 
     if req.extras.len() != 8 {
-        // Always send error even for quiet variants.
         write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
+    let flags = BigEndian::read_u32(&req.extras[0..4]);
     let expiry = BigEndian::read_u32(&req.extras[4..8]);
-    let key = std::str::from_utf8(req.key)?;
-    let val = std::str::from_utf8(req.value)?;
+    let rk = make_redis_key(req.key);
 
-    let exists = match with_ctx(|ctx| ctx.call("EXISTS", &[key])) {
-        Ok(RedisValue::Integer(n)) => n,
-        Ok(other) => {
-            eprintln!("[cbbridge] EXISTS returned unexpected value: {other:?}");
-            0
+    let op_name = match base {
+        Opcode::Set => "set",
+        Opcode::Add => "add",
+        Opcode::Replace => "replace",
+        _ => "set",
+    };
+
+    let req_cas = req.hdr.cas.to_string();
+    let flags_str = flags.to_string();
+    let expiry_str = expiry.to_string();
+
+    // EVAL LUA_STORE 2 <key> <cas_counter> <op> <value> <flags> <cas> <expiry>
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_STORE.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            op_name.as_bytes(),
+            req.value,
+            flags_str.as_bytes(),
+            req_cas.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL store error: {reply:?}")));
+    }
+
+    // Parse the Lua result: {status, new_cas_string}
+    let (status_code, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 2 => {
+            let st = eval_int(&arr[0]);
+            let cas_s = eval_str(&arr[1]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, cas_val)
         }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL store unexpected: {reply:?}")));
+        }
     };
 
-    let (do_it, err_if_skip) = match base {
-        Opcode::Set => (true, ST_OK),
-        Opcode::Add => (exists == 0, ST_IX),
-        Opcode::Replace => (exists != 0, ST_NF),
-        _ => (false, ST_UNK),
-    };
-    if !do_it {
-        // Error responses are always sent, even for quiet variants.
-        write_simple_response(sock, opcode, err_if_skip, req.hdr.opaque, CAS_ZERO, &[])?;
-        return Ok(());
-    }
-
-    with_ctx(|ctx| ctx.call("JSON.SET", &[key, "$", val]))
-        .map_err(|e| BridgeErr::Redis(e.to_string()))?;
-    if expiry != 0 {
-        with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
-    }
-
-    // Quiet variants suppress success responses.
-    if !opcode.is_quiet() {
-        write_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_PLACEHOLDER, &[], &[], &[])?;
+    match status_code {
+        0 => {
+            // Success
+            if !opcode.is_quiet() {
+                write_response(
+                    sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
+                )?;
+            }
+        }
+        -1 => {
+            // NOT_FOUND (REPLACE on missing key, or CAS on missing key)
+            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // KEY_EXISTS (ADD on existing key, or CAS mismatch)
+            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL store unknown status: {status_code}")));
+        }
     }
     Ok(())
 }
@@ -278,27 +498,63 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
-    let key = std::str::from_utf8(req.key)?;
-    let deleted = match with_ctx(|ctx| ctx.call("DEL", &[key])) {
-        Ok(RedisValue::Integer(n)) => n,
-        Ok(other) => {
-            eprintln!("[cbbridge] DEL returned unexpected value: {other:?}");
-            0
+    let rk = make_redis_key(req.key);
+    let req_cas = req.hdr.cas.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_DELETE.as_bytes(),
+            b"1",
+            rk.as_slice(),
+            req_cas.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL delete error: {reply:?}")));
+    }
+
+    let status_code = match &reply {
+        RedisValue::Integer(n) => *n,
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL delete unexpected: {reply:?}")));
         }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
 
-    let (status, cas) = if deleted == 1 {
-        (ST_OK, CAS_PLACEHOLDER)
-    } else {
-        (ST_NF, CAS_ZERO)
-    };
-    // Quiet variants suppress success; errors are always sent.
-    if opcode.is_quiet() && status == ST_OK {
-        return Ok(());
+    match status_code {
+        0 => {
+            // Deleted successfully.
+            if opcode.is_quiet() {
+                return Ok(());
+            }
+            // For DELETE success, we don't return the old CAS — just a non-zero one.
+            // Use a fresh CAS from the counter for the response.
+            let new_cas = get_next_cas();
+            write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
+        }
+        -1 => {
+            // NOT_FOUND
+            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        -2 => {
+            // KEY_EXISTS (CAS mismatch)
+            write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL delete unknown status: {status_code}")));
+        }
     }
-    write_simple_response(sock, opcode, status, req.hdr.opaque, cas, &[])?;
     Ok(())
+}
+
+/// Get the next CAS value from the Redis counter.
+#[cfg(not(test))]
+fn get_next_cas() -> u64 {
+    match with_ctx(|ctx| ctx.call("INCR", &[CAS_COUNTER_KEY])) {
+        Ok(RedisValue::Integer(n)) => n as u64,
+        _ => 1,
+    }
 }
 
 /* --------- INCR / DECR (and quiet variants) --------- */
@@ -312,46 +568,73 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         return Ok(());
     }
 
-    let delta   = BigEndian::read_u64(&req.extras[0..8]) as i64;
-    let initial = BigEndian::read_u64(&req.extras[8..16]) as i64;
+    let delta   = BigEndian::read_u64(&req.extras[0..8]);
+    let initial = BigEndian::read_u64(&req.extras[8..16]);
     let expiry  = BigEndian::read_u32(&req.extras[16..20]);
-    let key     = std::str::from_utf8(req.key)?;
+    let rk = make_redis_key(req.key);
 
-    let signed = if base == Opcode::Decrement {
-        -(delta as i64)
-    } else {
-        delta as i64
+    let is_decr = if base == Opcode::Decrement { "1" } else { "0" };
+    let delta_str = delta.to_string();
+    let initial_str = initial.to_string();
+    let expiry_str = expiry.to_string();
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_COUNTER.as_bytes(),
+            b"2",
+            rk.as_slice(),
+            CAS_COUNTER_KEY.as_bytes(),
+            delta_str.as_bytes(),
+            is_decr.as_bytes(),
+            initial_str.as_bytes(),
+            expiry_str.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        return Err(BridgeErr::Redis(format!("EVAL counter error: {reply:?}")));
+    }
+
+    // Parse result: {status, value_string, cas_string}
+    let (status_code, value_str, new_cas) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 3 => {
+            let st = eval_int(&arr[0]);
+            let val = eval_str(&arr[1]);
+            let cas_s = eval_str(&arr[2]);
+            let cas_val: u64 = cas_s.parse().unwrap_or(0);
+            (st, val, cas_val)
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL counter unexpected: {reply:?}")));
+        }
     };
 
-    let new_val: i64 = match with_ctx(|ctx| {
-        ctx.call("JSON.NUMINCRBY", &[key, "$", &signed.to_string()])
-    }) {
-        Ok(redis_module::RedisValue::Null) => {
-            with_ctx(|ctx| ctx.call("JSON.SET", &[key, "$", &initial.to_string()])).ok();
-            if expiry != 0 {
-                with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
+    match status_code {
+        0 => {
+            // Parse the counter value as u64.
+            let counter_val: u64 = value_str.parse().unwrap_or(0);
+            if !opcode.is_quiet() {
+                write_response(
+                    sock, opcode, ST_OK, req.hdr.opaque, new_cas,
+                    &[], &[], &counter_val.to_be_bytes(),
+                )?;
             }
-            initial
         }
-        Ok(val) => {
-            let s: String = val.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
-            s.parse().unwrap_or(0)
+        -1 => {
+            // NOT_FOUND (0xFFFFFFFF expiry)
+            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
-        Err(e) => return Err(BridgeErr::Redis(e.to_string())),
-    };
-
-    // Quiet variants suppress success responses.
-    if !opcode.is_quiet() {
-        write_response(
-            sock,
-            opcode,
-            ST_OK,
-            req.hdr.opaque,
-            CAS_PLACEHOLDER,
-            &[],
-            &[],
-            &new_val.to_be_bytes(),
-        )?;
+        -3 => {
+            // Non-numeric value
+            write_simple_response(
+                sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO,
+                b"Non-numeric value",
+            )?;
+        }
+        _ => {
+            return Err(BridgeErr::Redis(format!("EVAL counter unknown status: {status_code}")));
+        }
     }
     Ok(())
 }
@@ -363,13 +646,13 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn module_init(ctx: &Context, _args: &[RedisString]) -> Status {
     LISTENER.call_once(spawn_listener);
-    ctx.log_notice("cbbridge: listener started on 11210");
+    ctx.log_notice("redcouch: listener started on 11210");
     Status::Ok
 }
 
 #[cfg(not(test))]
 redis_module! {
-    name: "cbbridge",
+    name: "redcouch",
     version: 1,
     allocator: (
         redis_module::alloc::RedisAlloc,

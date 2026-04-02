@@ -3,21 +3,26 @@
 End-to-end integration tests for the RedCouch memcached binary protocol bridge.
 Requires: Redis 8+ with redcouch module loaded, listener on port 11210.
 
+The module now uses a hash-per-item model (no JSON dependency):
+  - Each memcached key → Redis Hash at `rc:<key>` with fields v, f, c
+  - CAS values are real, from a Redis-backed monotonic counter
+  - Values are stored as raw bytes (binary-safe)
+  - Flags are preserved from SET extras
+
 Environment variables:
-  REDCOUCH_JSON_AVAILABLE  - "1" if JSON commands work, "0" if not (set by run_e2e.sh)
-  REDIS_PORT               - Redis port for direct verification (default 16379)
+  REDIS_PORT  - Redis port for direct verification (default 16379)
 """
 import os, socket, struct, subprocess, sys, time
 
 MAGIC_REQ, MAGIC_RES, HDR = 0x80, 0x81, 24
 OP_GET, OP_SET, OP_ADD, OP_DELETE = 0x00, 0x01, 0x02, 0x04
+OP_INCR, OP_DECR = 0x05, 0x06
 OP_NOOP, OP_GETK = 0x0A, 0x0C
 OP_SETQ, OP_ADDQ, OP_DELETEQ = 0x11, 0x12, 0x14
 ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK = 0, 1, 2, 4, 0x81
-CAS_ZERO, CAS_PH = 0, 1
+CAS_ZERO = 0
 HOST, PORT, TMO = "127.0.0.1", 11210, 3.0
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "16379"))
-JSON_AVAILABLE = os.environ.get("REDCOUCH_JSON_AVAILABLE", "0") == "1"
 results = []
 known_gaps = []
 
@@ -71,9 +76,18 @@ def gap(name, detail):
 def set_extras(flags=0, expiry=0):
     return struct.pack(">II", flags, expiry)
 
+def incr_extras(delta=1, initial=0, expiry=0):
+    return struct.pack(">QQI", delta, initial, expiry)
+
 _TS = str(int(time.time()))
 def tkey(name):
     return f"t:{_TS}:{name}".encode()
+
+def redis_key(client_key):
+    """Return the namespaced Redis key for a client key."""
+    if isinstance(client_key, bytes):
+        return "rc:" + client_key.decode()
+    return "rc:" + client_key
 
 def redis_cli(*args):
     """Run a redis-cli command against the test Redis instance."""
@@ -87,55 +101,40 @@ def redis_cli(*args):
 
 
 # ═════════════════════════════════════════════════════════════════
-# 0. JSON dependency preflight
+# 0. Backing store preflight — hash-per-item model
 # ═════════════════════════════════════════════════════════════════
-def test_json_dependency():
-    """Verify whether JSON commands are available in the Redis instance.
-    The module's data path (SET/GET/ADD/REPLACE/DELETE/INCR/DECR) all
-    depend on JSON.SET / JSON.GET / JSON.NUMINCRBY."""
-    result = redis_cli("JSON.SET", "_e2e_probe", "$", '"probe"')
-    if "OK" in result:
-        redis_cli("DEL", "_e2e_probe")
-        chk("json_commands_available", True)
-    else:
-        chk("json_commands_available", False,
-            f"JSON.SET returned: {result!r}. "
-            "Module data path requires RedisJSON. "
-            "All data-path tests will show module behavior WITHOUT "
-            "a working backing store.")
-
-
-# ═════════════════════════════════════════════════════════════════
-# 0b. SET actually creates a key (verifies backing store)
-# ═════════════════════════════════════════════════════════════════
-def test_set_creates_key():
-    """After binary SET, verify the key actually exists in Redis."""
+def test_backing_store():
+    """Verify that SET creates a Redis Hash with v/f/c fields."""
     s = conn()
-    k = tkey("verify")
-    s.sendall(build_req(OP_SET, opaque=50, extras=set_extras(),
-                        key=k, value=b'"verify_val"'))
+    k = tkey("preflight")
+    s.sendall(build_req(OP_SET, opaque=50, extras=set_extras(flags=42),
+                        key=k, value=b"preflight_value"))
     d = recv_min(s, HDR)
     s.close()
     r, _ = parse_resp(d)
 
-    # Module returns ST_OK regardless — check what Redis actually has
-    key_str = k.decode()
-    exists = redis_cli("EXISTS", key_str)
-    key_type = redis_cli("TYPE", key_str)
+    rk = redis_key(k)
+    exists = redis_cli("EXISTS", rk)
+    key_type = redis_cli("TYPE", rk)
 
-    if r and r["status"] == ST_OK:
-        if exists == "1":
-            chk("set_creates_key_in_redis", True)
-            chk("set_key_type", key_type == "ReJSON-RL",
-                f"expected ReJSON-RL, got {key_type!r}")
-        else:
-            chk("set_creates_key_in_redis", False,
-                f"SET returned ST_OK but key does not exist in Redis "
-                f"(EXISTS={exists}, TYPE={key_type}). "
-                "Module reports success without a working backing store.")
-    else:
-        chk("set_creates_key_in_redis", False,
-            f"SET did not return ST_OK: {r}")
+    chk("set_returns_st_ok", r and r["status"] == ST_OK, f"got {r}")
+    chk("set_creates_hash_key", exists == "1",
+        f"EXISTS={exists} for {rk}")
+    chk("set_key_type_hash", key_type == "hash",
+        f"expected hash, got {key_type!r}")
+
+    if exists == "1":
+        val = redis_cli("HGET", rk, "v")
+        flags = redis_cli("HGET", rk, "f")
+        cas = redis_cli("HGET", rk, "c")
+        chk("set_stores_value", val == "preflight_value",
+            f"expected 'preflight_value', got {val!r}")
+        chk("set_stores_flags", flags == "42",
+            f"expected '42', got {flags!r}")
+        chk("set_stores_cas", cas and int(cas) > 0,
+            f"expected non-zero CAS, got {cas!r}")
+    chk("set_returns_real_cas", r and r["cas"] > 0,
+        f"cas={r and r['cas']}, expected > 0")
 
 
 # ── 1. NOOP baseline ────────────────────────────────────────────
@@ -214,7 +213,7 @@ def test_quiet_setq_suppressed():
     s = conn()
     k = tkey("qset")
     setq = build_req(OP_SETQ, opaque=400, extras=set_extras(),
-                     key=k, value=b'"qval"')
+                     key=k, value=b"qval")
     noop = build_req(OP_NOOP, opaque=401)
     s.sendall(setq + noop)
     d = recv_min(s, HDR)
@@ -227,63 +226,52 @@ def test_quiet_setq_suppressed():
 
 # ── 6. Quiet error NOT suppressed (ADDQ on existing) ────────────
 def test_quiet_addq_error_preserved():
-    """ADD on existing key → ST_IX; ADDQ should also return ST_IX.
-    NOTE: This test validates the quiet-error-preserved protocol invariant.
-    The module currently may fail to detect the key exists due to
-    JSON key/EXISTS interaction, which is a known data-model gap."""
+    """ADD on existing key → ST_IX; ADDQ should also return ST_IX."""
     s = conn()
     k = tkey("qadd")
     # First SET the key (loud, consume response)
     s.sendall(build_req(OP_SET, opaque=410, extras=set_extras(),
-                        key=k, value=b'"v1"'))
+                        key=k, value=b"v1"))
     r0d = recv_min(s, HDR)
     r0, _ = parse_resp(r0d)
+    chk("addq_set_prerequisite", r0 and r0["status"] == ST_OK,
+        f"SET prerequisite: {r0}")
     if not r0 or r0["status"] != ST_OK:
-        gap("quiet_addq_error_preserved",
-            f"SET prerequisite failed: {r0}")
         s.close()
         return
     # ADDQ same key (should fail with ST_IX, error NOT suppressed)
     addq = build_req(OP_ADDQ, opaque=411, extras=set_extras(),
-                     key=k, value=b'"v2"')
+                     key=k, value=b"v2")
     noop = build_req(OP_NOOP, opaque=412)
     s.sendall(addq + noop)
     d = recv_min(s, HDR * 2)
     s.close()
     r1, off = parse_resp(d)
-    if r1 and r1["opaque"] == 411 and r1["status"] == ST_IX:
-        chk("addq_error_not_suppressed", True)
+    chk("addq_error_not_suppressed",
+        r1 and r1["opaque"] == 411 and r1["status"] == ST_IX,
+        f"expected ADDQ opaque=411 ST_IX, got {r1}")
+    if r1 and r1["opaque"] == 411:
         r2, _ = parse_resp(d, off)
         chk("addq_noop_follows",
             r2 and r2["opaque"] == 412 and r2["status"] == ST_OK,
             f"expected NOOP opaque=412, got {r2}")
-    elif r1 and r1["opaque"] == 412:
-        # ADDQ succeeded (didn't detect existing key) — known data-model gap
-        gap("addq_error_not_suppressed",
-            "ADDQ succeeded instead of returning ST_IX — no JSON commands "
-            "means SET never stored the key, so EXISTS returns 0")
-    else:
-        chk("addq_error_not_suppressed", False,
-            f"unexpected response: {r1}")
 
 
 # ── 7. DELETEQ success suppressed, miss error sent ──────────────
 def test_quiet_deleteq():
-    """DELETEQ hit → suppressed; DELETEQ miss → ST_NF sent.
-    Uses a fresh key and verifies DELETE suppression independently."""
+    """DELETEQ hit → suppressed; DELETEQ miss → ST_NF sent."""
     s = conn()
     k = tkey("qdel2")
     # Create key and wait for response
     s.sendall(build_req(OP_SET, opaque=500, extras=set_extras(),
-                        key=k, value=b'"dv"'))
+                        key=k, value=b"dv"))
     r0d = recv_min(s, HDR)
     r0, _ = parse_resp(r0d)
+    chk("deleteq_set_prerequisite", r0 and r0["status"] == ST_OK,
+        f"SET prerequisite: {r0}")
     if not r0 or r0["status"] != ST_OK:
-        gap("deleteq_quiet_behavior",
-            f"SET prerequisite failed: {r0}")
         s.close()
         return
-    time.sleep(0.1)  # ensure key is committed
     # DELETEQ existing → success suppressed
     delq1 = build_req(OP_DELETEQ, opaque=501, key=k)
     # DELETEQ same key (now gone) → miss → ST_NF
@@ -293,48 +281,32 @@ def test_quiet_deleteq():
     d = recv_min(s, HDR * 2)
     s.close()
     r1, off = parse_resp(d)
+    chk("deleteq_success_suppressed",
+        r1 and r1["opaque"] == 502,
+        f"expected opaque=502 (first DELETEQ suppressed), got {r1}")
     if r1 and r1["opaque"] == 502:
-        chk("deleteq_success_suppressed", True)
         chk("deleteq_miss_error_sent", r1["status"] == ST_NF,
             f"expected ST_NF, got 0x{r1['status']:04x}")
-    elif r1 and r1["opaque"] == 501:
-        # First DELETEQ responded with ST_NF — key not found
-        if r1["status"] == ST_NF:
-            gap("deleteq_success_suppressed",
-                "DELETEQ returned ST_NF — no JSON commands means SET "
-                "never stored the key, so DEL returns 0")
-        else:
-            chk("deleteq_success_suppressed", False,
-                f"DELETEQ success not suppressed: {r1}")
-        gap("deleteq_miss_error_sent", "cascade from deleteq gap")
-    elif r1 and r1["opaque"] == 503:
-        chk("deleteq_success_suppressed", True)
-        chk("deleteq_miss_error_sent", False,
-            "DELETEQ miss was also suppressed (should send ST_NF)")
-    else:
-        chk("deleteq_success_suppressed", False, f"unexpected: {r1}")
-        chk("deleteq_miss_error_sent", False, f"unexpected: {r1}")
 
 
-# ── 8. CAS: PLACEHOLDER on success, ZERO on error/control ───────
+# ── 8. CAS: real per-item CAS on success, ZERO on error/control ──
 def test_cas_set_success():
-    """SET success → CAS_PLACEHOLDER."""
+    """SET success → real non-zero CAS from counter."""
     s = conn()
     k = tkey("cas_s")
     s.sendall(build_req(OP_SET, opaque=600, extras=set_extras(),
-                        key=k, value=b'"cv"'))
+                        key=k, value=b"cv"))
     d = recv_min(s, HDR)
     s.close()
     r, _ = parse_resp(d)
-    chk("cas_set_success_placeholder",
-        r and r["status"] == ST_OK and r["cas"] == CAS_PH,
-        f"got {r}")
+    chk("cas_set_success_nonzero",
+        r and r["status"] == ST_OK and r["cas"] > 0,
+        f"got cas={r and r['cas']}")
 
 
 def test_cas_errors_zero():
-    """Error/control responses → CAS_ZERO. Uses separate connections
-    because GET miss kills the connection (JSON.GET unknown command)."""
-    # DELETE miss → CAS_ZERO (uses DEL which works without JSON)
+    """Error/control responses → CAS_ZERO."""
+    # DELETE miss → CAS_ZERO
     s = conn()
     s.sendall(build_req(OP_DELETE, opaque=611, key=tkey("cas_no2")))
     d = recv_min(s, HDR)
@@ -354,119 +326,193 @@ def test_cas_errors_zero():
         r3 and r3["cas"] == CAS_ZERO,
         f"NOOP cas={r3 and r3['cas']}")
 
-    # GET miss — may fail due to JSON.GET returning error on missing key
+    # GET miss → CAS_ZERO (no more connection kill — HMGET works)
     s = conn()
     s.sendall(build_req(OP_GET, opaque=610, key=tkey("cas_no")))
     d = recv_min(s, HDR)
     s.close()
     r1, _ = parse_resp(d)
-    if r1:
-        chk("cas_get_miss_zero",
-            r1["cas"] == CAS_ZERO,
-            f"GET miss cas={r1['cas']}")
-    else:
-        gap("cas_get_miss_zero",
-            "GET miss killed connection — JSON.GET is unknown command, "
-            "module propagates as connection error")
+    chk("cas_get_miss_zero",
+        r1 and r1["status"] == ST_NF and r1["cas"] == CAS_ZERO,
+        f"GET miss: {r1}")
 
 
 def test_cas_delete_success():
-    """DELETE success → CAS_PLACEHOLDER."""
+    """DELETE success → non-zero CAS."""
     s = conn()
     k = tkey("cas_d")
     s.sendall(build_req(OP_SET, opaque=620, extras=set_extras(),
-                        key=k, value=b'"x"'))
+                        key=k, value=b"x"))
     r0d = recv_min(s, HDR)
     r0, _ = parse_resp(r0d)
+    chk("cas_del_set_prerequisite", r0 and r0["status"] == ST_OK,
+        f"SET prerequisite: {r0}")
     if not r0 or r0["status"] != ST_OK:
-        gap("cas_delete_success", f"SET prerequisite failed: {r0}")
         s.close()
         return
     s.sendall(build_req(OP_DELETE, opaque=621, key=k))
     d = recv_min(s, HDR)
     s.close()
     r, _ = parse_resp(d)
-    if r and r["status"] == ST_OK:
-        chk("cas_delete_success_placeholder",
-            r["cas"] == CAS_PH,
-            f"CAS={r['cas']}, expected {CAS_PH}")
-    elif r and r["status"] == ST_NF:
-        gap("cas_delete_success_placeholder",
-            "DELETE returned ST_NF — no JSON commands means SET "
-            "never stored the key, so DEL returns 0")
-    else:
-        chk("cas_delete_success_placeholder", False, f"unexpected: {r}")
+    chk("cas_delete_success_nonzero",
+        r and r["status"] == ST_OK and r["cas"] > 0,
+        f"CAS={r and r['cas']}")
 
 
-# ── 9. SET/GET round-trip with direct Redis verification ─────────
+# ── 9. SET/GET round-trip ──────────────────────────────────────────
 def test_set_get_roundtrip():
-    """SET then GET, with direct Redis verification that key was created.
-    Without JSON commands, SET returns ST_OK but creates no key — this is
-    a module bug (silent JSON.SET failure misclassified as success)."""
+    """SET then GET — values, flags, CAS round-trip correctly."""
     s = conn()
     k = tkey("rt")
-    key_str = k.decode()
-    val = b'"hello"'
-    s.sendall(build_req(OP_SET, opaque=700, extras=set_extras(),
+    val = b"hello world"
+    FLAGS = 0xDEAD
+    s.sendall(build_req(OP_SET, opaque=700, extras=set_extras(flags=FLAGS),
                         key=k, value=val))
     rd = recv_min(s, HDR)
     r1, _ = parse_resp(rd)
 
-    # Module always returns ST_OK — verify the KEY actually exists
-    exists = redis_cli("EXISTS", key_str)
-    if r1 and r1["status"] == ST_OK and exists == "1":
-        chk("set_creates_and_returns_ok", True)
-        # Try GET
-        s.sendall(build_req(OP_GET, opaque=701, key=k))
-        gd = recv_min(s, HDR)
-        s.close()
-        r2, _ = parse_resp(gd)
-        if r2 and r2["status"] == ST_OK:
-            got_val = r2["body"][r2["extras_len"]:]
-            chk("get_returns_value", got_val == val,
-                f"expected {val!r}, got {got_val!r}")
-        else:
-            gap("get_after_set",
-                f"GET failed (JSON.GET response conversion): {r2}")
-    elif r1 and r1["status"] == ST_OK and exists != "1":
-        s.close()
-        chk("set_creates_and_returns_ok", False,
-            f"SET returned ST_OK but key does not exist in Redis "
-            f"(EXISTS={exists}). Module silently swallows JSON.SET "
-            f"failure and misreports success.")
-    else:
-        s.close()
-        chk("set_creates_and_returns_ok", False,
-            f"SET did not return ST_OK: {r1}")
+    rk = redis_key(k)
+    exists = redis_cli("EXISTS", rk)
+    chk("roundtrip_set_ok",
+        r1 and r1["status"] == ST_OK and exists == "1",
+        f"SET status={r1 and r1['status']}, EXISTS={exists}")
+    set_cas = r1["cas"] if r1 else 0
+
+    # GET
+    s.sendall(build_req(OP_GET, opaque=701, key=k))
+    gd = recv_min(s, HDR + 4 + len(val) + 10)
+    s.close()
+    r2, _ = parse_resp(gd)
+    chk("roundtrip_get_ok", r2 and r2["status"] == ST_OK,
+        f"GET: {r2}")
+    if r2 and r2["status"] == ST_OK:
+        # Extras = 4 bytes flags
+        got_extras = r2["body"][:r2["extras_len"]]
+        got_val = r2["body"][r2["extras_len"]:]
+        got_flags = struct.unpack(">I", got_extras)[0] if len(got_extras) == 4 else None
+        chk("roundtrip_value_match", got_val == val,
+            f"expected {val!r}, got {got_val!r}")
+        chk("roundtrip_flags_match", got_flags == FLAGS,
+            f"expected 0x{FLAGS:04x}, got {got_flags}")
+        chk("roundtrip_cas_match", r2["cas"] == set_cas,
+            f"GET CAS={r2['cas']}, SET CAS={set_cas}")
+
+
+# ── 10. CAS-conditional SET ──────────────────────────────────────
+def test_cas_conditional_set():
+    """CAS-conditional SET: correct CAS succeeds, wrong CAS returns ST_IX."""
+    s = conn()
+    k = tkey("cas_cond")
+    # Initial SET
+    s.sendall(build_req(OP_SET, opaque=800, extras=set_extras(),
+                        key=k, value=b"v1"))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("cas_cond_initial_set", r1 and r1["status"] == ST_OK, f"{r1}")
+    real_cas = r1["cas"] if r1 else 0
+
+    # SET with correct CAS → should succeed
+    s.sendall(build_req(OP_SET, opaque=801, cas=real_cas,
+                        extras=set_extras(), key=k, value=b"v2"))
+    rd = recv_min(s, HDR)
+    r2, _ = parse_resp(rd)
+    chk("cas_cond_correct_cas_ok",
+        r2 and r2["status"] == ST_OK and r2["cas"] > real_cas,
+        f"status={r2 and r2['status']}, cas={r2 and r2['cas']}")
+
+    # SET with stale CAS (the one from first SET) → should fail
+    s.sendall(build_req(OP_SET, opaque=802, cas=real_cas,
+                        extras=set_extras(), key=k, value=b"v3"))
+    rd = recv_min(s, HDR)
+    r3, _ = parse_resp(rd)
+    chk("cas_cond_stale_cas_ix",
+        r3 and r3["status"] == ST_IX,
+        f"expected ST_IX, got {r3}")
+    s.close()
+
+
+# ── 11. INCR / DECR counter operations ───────────────────────────
+def test_incr_decr():
+    """INCR/DECR with initial values, delta, and underflow clamping."""
+    s = conn()
+    k = tkey("ctr")
+
+    # INCR on non-existent key with initial=100, delta=1
+    s.sendall(build_req(OP_INCR, opaque=900,
+                        extras=incr_extras(delta=1, initial=100, expiry=0),
+                        key=k))
+    rd = recv_min(s, HDR + 8)
+    r1, _ = parse_resp(rd)
+    chk("incr_initial", r1 and r1["status"] == ST_OK, f"{r1}")
+    if r1 and r1["status"] == ST_OK:
+        body = r1["body"]
+        val = struct.unpack(">Q", body)[0] if len(body) == 8 else None
+        chk("incr_initial_value", val == 100,
+            f"expected 100, got {val}")
+
+    # INCR existing key with delta=5
+    s.sendall(build_req(OP_INCR, opaque=901,
+                        extras=incr_extras(delta=5, initial=0, expiry=0),
+                        key=k))
+    rd = recv_min(s, HDR + 8)
+    r2, _ = parse_resp(rd)
+    if r2 and r2["status"] == ST_OK:
+        val = struct.unpack(">Q", r2["body"])[0] if len(r2["body"]) == 8 else None
+        chk("incr_delta", val == 105, f"expected 105, got {val}")
+
+    # DECR with delta=200 (underflow → clamp to 0)
+    s.sendall(build_req(OP_DECR, opaque=902,
+                        extras=incr_extras(delta=200, initial=0, expiry=0),
+                        key=k))
+    rd = recv_min(s, HDR + 8)
+    r3, _ = parse_resp(rd)
+    if r3 and r3["status"] == ST_OK:
+        val = struct.unpack(">Q", r3["body"])[0] if len(r3["body"]) == 8 else None
+        chk("decr_underflow_clamp", val == 0, f"expected 0, got {val}")
+
+    # INCR with 0xFFFFFFFF expiry on missing key → NOT_FOUND
+    k2 = tkey("ctr_miss")
+    s.sendall(build_req(OP_INCR, opaque=903,
+                        extras=incr_extras(delta=1, initial=0, expiry=0xFFFFFFFF),
+                        key=k2))
+    rd = recv_min(s, HDR)
+    r4, _ = parse_resp(rd)
+    chk("incr_miss_0xFFFFFFFF",
+        r4 and r4["status"] == ST_NF,
+        f"expected ST_NF, got {r4}")
+    s.close()
 
 
 # ═════════════════════════════════════════════════════════════════
 # Runner
 # ═════════════════════════════════════════════════════════════════
 ALL_TESTS = [
-    # Preflight: verify environment
-    test_json_dependency,
-    test_set_creates_key,
+    # Preflight: verify hash-per-item backing store
+    test_backing_store,
     # Protocol framing (no data-path dependency)
     test_noop,
     test_bad_magic,
     test_malformed_frame,
     test_unknown_opcode,
-    # Quiet suppression
+    # Quiet suppression (now backed by real data path)
     test_quiet_setq_suppressed,
     test_quiet_addq_error_preserved,
     test_quiet_deleteq,
-    # CAS semantics
+    # CAS semantics (real per-item CAS)
     test_cas_set_success,
     test_cas_errors_zero,
     test_cas_delete_success,
     # Data path round-trip
     test_set_get_roundtrip,
+    # CAS-conditional operations
+    test_cas_conditional_set,
+    # Counter operations
+    test_incr_decr,
 ]
 
 if __name__ == "__main__":
     print(f"RedCouch binary-protocol E2E tests ({HOST}:{PORT})")
-    print(f"JSON available: {JSON_AVAILABLE}")
+    print(f"Data model: hash-per-item (no JSON dependency)")
     print(f"{'=' * 60}")
     for fn in ALL_TESTS:
         print(f"\n▸ {fn.__name__}")
