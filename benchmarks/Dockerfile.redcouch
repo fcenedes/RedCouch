@@ -1,0 +1,46 @@
+# Multi-stage build for Redis + RedCouch benchmark container.
+# Builds the Rust Redis module from source and loads it into a Redis 8 image,
+# ensuring the same container runtime as Redis OSS and Couchbase OSS benchmarks.
+
+# ── Stage 1: Build the RedCouch module ──────────────────────────────
+FROM rust:bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang libclang-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy only manifests first for layer caching
+COPY Cargo.toml Cargo.lock* ./
+# Create a dummy src to pre-build dependencies only
+RUN mkdir src && echo "" > src/lib.rs && \
+    cargo build --release --lib 2>/dev/null || true && \
+    rm -rf src target/release/libred_couch* target/release/deps/libred_couch*
+
+# Copy real source and patch bind address for container networking.
+# The default loopback bind (127.0.0.1) is correct for host-native use,
+# but inside a container the listener must bind 0.0.0.0 to be reachable
+# via Docker port mapping.
+COPY src/ src/
+RUN sed -i 's/127\.0\.0\.1:11210/0.0.0.0:11210/g' src/lib.rs && \
+    cargo build --release --lib && \
+    ls -la target/release/libred_couch.so && \
+    nm -D target/release/libred_couch.so | grep -i RedisModule_OnLoad
+
+# ── Stage 2: Runtime with Redis 8 ──────────────────────────────────
+FROM redis:8
+
+# Copy the compiled module
+COPY --from=builder /build/target/release/libred_couch.so /usr/local/lib/redcouch.so
+
+# Expose Redis port and RedCouch memcached listener port
+EXPOSE 6379 11210
+
+# Start Redis with the module loaded, matching Redis OSS benchmark settings
+CMD ["redis-server", \
+     "--loadmodule", "/usr/local/lib/redcouch.so", \
+     "--save", "", \
+     "--appendonly", "no", \
+     "--maxmemory", "256mb", \
+     "--maxmemory-policy", "allkeys-lru"]
