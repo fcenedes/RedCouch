@@ -288,12 +288,16 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
 
-    let status = if deleted == 1 { ST_OK } else { ST_NF };
+    let (status, cas) = if deleted == 1 {
+        (ST_OK, CAS_PLACEHOLDER)
+    } else {
+        (ST_NF, CAS_ZERO)
+    };
     // Quiet variants suppress success; errors are always sent.
     if opcode.is_quiet() && status == ST_OK {
         return Ok(());
     }
-    write_simple_response(sock, opcode, status, req.hdr.opaque, CAS_ZERO, &[])?;
+    write_simple_response(sock, opcode, status, req.hdr.opaque, cas, &[])?;
     Ok(())
 }
 
