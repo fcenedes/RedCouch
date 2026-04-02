@@ -48,7 +48,7 @@
 | **Auth** | ❌ Not supported | No SASL/auth in ASCII text mode (per memcached spec). |
 | **noreply** | ✅ Implemented | Suppresses responses on successfully parsed commands. On malformed input, `CLIENT_ERROR` may still be emitted because `noreply` cannot be reliably inferred before successful parse. |
 | **Protocol detection** | Automatic | First byte `0x80` → binary; printable ASCII → text; `\r`/`\n` skipped. |
-| **Meta commands** | Stub | `mg`/`ms`/`md`/`ma`/`mn`/`me` prefixes detected via text-path prefix router and return `SERVER_ERROR meta protocol not supported`. |
+| **Meta commands** | ✅ Implemented | `mg`/`ms`/`md`/`ma`/`mn` fully implemented via text-path prefix router. `me` (debug) returns `EN`. Unsupported flags rejected with `CLIENT_ERROR`. See meta matrix below. |
 
 ### Item Model
 
@@ -156,7 +156,7 @@ Malformed requests are handled with clean disconnect or timeout, not crashes:
 ### 3.7 Deferred Surfaces
 
 The following are **explicitly not in GA scope**:
-- Meta protocol (text-path prefix router dispatches `mg`/`ms`/`md`/`ma`/`mn`/`me` to a stub that returns `SERVER_ERROR meta protocol not supported`; actual meta command handling is deferred)
+- Meta protocol **stale items** (`N`/vivify on mg, `I`/invalidate on md, `R`/recache, `W`/`X`/`Z` stale flags, `b`/base64 keys) — these require a stale item concept not in the current item model
 - UDP transport
 - Couchbase bucket/vbucket management
 - Dynamic STAT groups (settings, items, slabs, conns)
@@ -203,7 +203,7 @@ The module registers as `redcouch` and starts a TCP listener on `127.0.0.1:11210
 # Build check
 cargo check
 
-# Run unit/protocol tests (118 tests — 60 binary + 58 ASCII)
+# Run unit/protocol tests (143 tests — 60 binary + 58 ASCII + 25 meta)
 cargo test
 
 # Run E2E integration tests (requires running Redis 8+ with module loaded)
@@ -239,6 +239,7 @@ cd benchmarks && bash run_stress_soak.sh
 |---|---|---|
 | Binary protocol unit tests | 60 | `src/protocol.rs` (via `cargo test`) |
 | ASCII protocol unit tests | 58 | `src/ascii.rs` (via `cargo test`) — 47 parser + 11 meta prefix routing |
+| Meta protocol unit tests | 25 | `src/meta.rs` (via `cargo test`) — parser, flag validation, mode validation, numeric token validation |
 | Integration/E2E tests | Suite | `tests/integration/test_binary_protocol.py` |
 | Benchmark workloads | 10+ profiles | `benchmarks/bench_binary_protocol.py` |
 | Stress/soak workloads | 7 phases | `benchmarks/stress_soak_validation.py` |
@@ -268,7 +269,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ### Testing
 
-- [x] **Unit tests pass**: `cargo test` — 118 tests (60 binary + 58 ASCII), 0 failures
+- [x] **Unit tests pass**: `cargo test` — 143 tests (60 binary + 58 ASCII + 25 meta), 0 failures
 - [x] **E2E integration suite**: live Redis 8.4.0 binary-client verification
 - [x] **Benchmark baseline captured**: artifact with provenance tag `verifier-wave9b`
 - [x] **Stress/soak validation**: 7-phase suite, 0 errors, stable memory, clean malformed handling
@@ -280,7 +281,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 - [x] **Known limitations**: counter precision, append growth, hot paths, startup caveat, SASL stub
 - [x] **Configuration reference**: all runtime constants with values and sources
 - [x] **Benchmark provenance**: artifact filenames, git refs, platform details
-- [x] **Deferred surfaces**: meta, UDP, bucket/vbucket explicitly listed as out of scope
+- [x] **Deferred surfaces**: meta stale items, UDP, bucket/vbucket explicitly listed as out of scope
 
 ### Go / No-Go Decision
 
@@ -293,6 +294,6 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 | Connection churn resilience | ✅ | 169 conn/s, 0 failures |
 | Memory stability under soak | ✅ | 742 KB growth over 175k ops |
 | Known limitations documented | ✅ | Counter precision, append caveat, hot paths, startup, SASL |
-| Deferred work explicitly scoped | ✅ | Meta/UDP/bucket not in GA |
+| Deferred work explicitly scoped | ✅ | Meta stale items/UDP/bucket not in GA |
 
 **Recommendation**: **GO** for GA release of the memcached binary + ASCII text protocol over TCP scope on Redis 8+.

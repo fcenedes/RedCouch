@@ -324,6 +324,7 @@ use crate::meta::{
     MetaCmd, MetaFlag, MetaParseResult, parse_meta_command,
     has_flag, get_flag_token, write_meta_flag_echo,
     validate_mg_flags, validate_ms_flags, validate_md_flags, validate_ma_flags,
+    validate_mn_flags, validate_me_flags,
 };
 #[cfg(not(test))]
 use redis_module::RedisValue;
@@ -614,6 +615,12 @@ fn dispatch_cmd(cmd: AsciiCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br
 fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br<()> {
     match cmd {
         MetaCmd::Noop { flags } => {
+            if let Err(e) = validate_mn_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
             meta_noop(&flags, out)
         }
         MetaCmd::Get { key, flags } => {
@@ -653,6 +660,12 @@ fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -
             meta_arithmetic(key, &flags, out)
         }
         MetaCmd::Debug { key, flags } => {
+            if let Err(e) = validate_me_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
             // me is unsupported — always return EN (not found).
             let quiet = has_flag(&flags, b'q');
             if !quiet {
@@ -1222,12 +1235,12 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
                 }
             }
         }
-        _ => {
+        "S" | "E" | "R" => {
             // S (set), E (add), R (replace) modes.
             let op_name = match mode {
                 "E" => "add",
                 "R" => "replace",
-                _ => "set", // S or default
+                _ => "set",
             };
             let rk = make_redis_key(key);
             let cas_str = cas.to_string();
@@ -1294,6 +1307,10 @@ fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> B
                     }
                 }
             }
+        }
+        _ => {
+            // Unreachable: validate_ms_flags rejects unknown modes before dispatch.
+            if !quiet { out.extend_from_slice(b"CLIENT_ERROR unsupported ms mode\r\n"); }
         }
     }
     Ok(())
@@ -1366,6 +1383,7 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
 
     let delta_str = get_flag_token(flags, b'D').unwrap_or("1");
     let mode = get_flag_token(flags, b'M').unwrap_or("I");
+    // Mode validation already done in validate_ma_flags; only I/D reach here.
     let is_decr = mode == "D";
     let is_decr_str = if is_decr { "1" } else { "0" };
     let initial = get_flag_token(flags, b'J').unwrap_or("0");
@@ -1422,12 +1440,6 @@ fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> 
                     out.push(b' ');
                     out.push(b'c');
                     out.extend_from_slice(cas_str.as_bytes());
-                }
-                if has_flag(flags, b't') {
-                    // Return TTL — counter doesn't easily give this, use -1 (no expiry) as default.
-                    // We could query Redis TTL, but that's an extra call. For now use the N flag value
-                    // if it was set and the key was just created, otherwise -1.
-                    out.extend_from_slice(b" t-1");
                 }
                 write_meta_flag_echo(out, flags, key);
                 out.extend_from_slice(b"\r\n");

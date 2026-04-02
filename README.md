@@ -29,7 +29,7 @@ The module starts a TCP listener on `127.0.0.1:11210` accepting both memcached b
 ## Test
 
 ```bash
-# Unit and protocol tests (60 tests)
+# Unit and protocol tests (143 tests — binary, ASCII, meta)
 cargo test
 
 # Integration tests (requires Redis 8+ with module loaded)
@@ -53,7 +53,7 @@ See [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) for the full GA release documenta
 - **Namespaced keys**: client keys prefixed with `rc:`, system keys under `redcouch:sys:*`
 - **Atomic mutations**: all CAS-sensitive operations use server-side Lua scripts
 - **Binary-safe values**: full binary round-trip via Lua hex encode/decode
-- **Dual protocol**: automatic binary/ASCII detection on first byte; ASCII text protocol covers all 19 standard commands (no auth in text mode)
+- **Dual protocol**: automatic binary/ASCII detection on first byte; ASCII text protocol covers all 19 standard commands (no auth in text mode) plus meta protocol commands (mg/ms/md/ma/mn)
 - **Safe defaults**: loopback-only bind, 1024 connection limit, 30s read / 10s write timeouts, 20 MiB frame cap
 
 ## Platform Support

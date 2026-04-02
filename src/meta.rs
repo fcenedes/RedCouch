@@ -85,16 +85,25 @@ pub(crate) fn validate_mg_flags(flags: &[MetaFlag]) -> Result<(), String> {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
+    validate_numeric_tokens(flags, b"T")?;
     Ok(())
 }
 
-/// Validate flags for ms.
+/// Validate flags for ms. Also validates M mode token and numeric tokens.
 pub(crate) fn validate_ms_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"FTCqOkM";
     for f in flags {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
+    // Validate M mode token: only S, E, A, P, R allowed.
+    if let Some(mode) = get_flag_token(flags, b'M') {
+        match mode {
+            "S" | "E" | "A" | "P" | "R" => {}
+            _ => return Err(format!("unsupported ms mode '{mode}'")),
+        }
+    }
+    validate_numeric_tokens(flags, b"FTC")?;
     Ok(())
 }
 
@@ -105,18 +114,68 @@ pub(crate) fn validate_md_flags(flags: &[MetaFlag]) -> Result<(), String> {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
+    validate_numeric_tokens(flags, b"C")?;
     Ok(())
 }
 
 /// Validate flags for ma.
 pub(crate) fn validate_ma_flags(flags: &[MetaFlag]) -> Result<(), String> {
-    const SUPPORTED: &[u8] = b"DJNqOkvctM";
+    const SUPPORTED: &[u8] = b"DJNqOkvcM";
+    for f in flags {
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        return Err(format!("unsupported meta flag '{}'", f.ch as char));
+    }
+    // Validate M mode token: only I, D allowed.
+    if let Some(mode) = get_flag_token(flags, b'M') {
+        match mode {
+            "I" | "D" => {}
+            _ => return Err(format!("unsupported ma mode '{mode}'")),
+        }
+    }
+    validate_numeric_tokens(flags, b"DJN")?;
+    Ok(())
+}
+
+/// Validate flags for mn. Only O (opaque) is supported.
+pub(crate) fn validate_mn_flags(flags: &[MetaFlag]) -> Result<(), String> {
+    const SUPPORTED: &[u8] = b"O";
     for f in flags {
         if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     Ok(())
 }
+
+/// Validate flags for me. Only O, k, q are supported.
+pub(crate) fn validate_me_flags(flags: &[MetaFlag]) -> Result<(), String> {
+    const SUPPORTED: &[u8] = b"Okq";
+    for f in flags {
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        return Err(format!("unsupported meta flag '{}'", f.ch as char));
+    }
+    Ok(())
+}
+
+/// Validate that flag tokens expected to be numeric are actually valid unsigned integers.
+/// `numeric_flags` lists the flag characters that require numeric tokens.
+fn validate_numeric_tokens(flags: &[MetaFlag], numeric_flags: &[u8]) -> Result<(), String> {
+    for f in flags {
+        if numeric_flags.contains(&f.ch) {
+            if let Some(ref tok) = f.token {
+                if tok.parse::<u64>().is_err() {
+                    return Err(format!(
+                        "bad numeric value '{}' for flag '{}'",
+                        tok, f.ch as char
+                    ));
+                }
+            }
+            // A flag like 'F' without a token is valid (means 0 or default).
+        }
+    }
+    Ok(())
+}
+
+
 
 // ── Command parsing ─────────────────────────────────────────────────
 
@@ -318,6 +377,18 @@ mod tests {
     }
 
     #[test]
+    fn flag_validation_ms_rejects_unknown_mode() {
+        let bad = parse_meta_flags(&["MX"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_ms_rejects_bad_numeric() {
+        let bad = parse_meta_flags(&["Tabc"]).unwrap();
+        assert!(validate_ms_flags(&bad).is_err());
+    }
+
+    #[test]
     fn flag_validation_md() {
         let flags = parse_meta_flags(&["C5", "q", "k"]).unwrap();
         assert!(validate_md_flags(&flags).is_ok());
@@ -327,9 +398,58 @@ mod tests {
     }
 
     #[test]
+    fn flag_validation_md_rejects_bad_cas() {
+        let bad = parse_meta_flags(&["Cabc"]).unwrap();
+        assert!(validate_md_flags(&bad).is_err());
+    }
+
+    #[test]
     fn flag_validation_ma() {
         let flags = parse_meta_flags(&["D10", "J0", "N300", "q", "v", "c", "MI"]).unwrap();
         assert!(validate_ma_flags(&flags).is_ok());
+    }
+
+    #[test]
+    fn flag_validation_ma_rejects_unknown_mode() {
+        let bad = parse_meta_flags(&["MX"]).unwrap();
+        assert!(validate_ma_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_ma_rejects_t_flag() {
+        // t flag removed from ma — not accurately implementable.
+        let bad = parse_meta_flags(&["t"]).unwrap();
+        assert!(validate_ma_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_ma_rejects_bad_delta() {
+        let bad = parse_meta_flags(&["Dabc"]).unwrap();
+        assert!(validate_ma_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_mn() {
+        let flags = parse_meta_flags(&["Oabc"]).unwrap();
+        assert!(validate_mn_flags(&flags).is_ok());
+
+        let bad = parse_meta_flags(&["v"]).unwrap();
+        assert!(validate_mn_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_me() {
+        let flags = parse_meta_flags(&["Oabc", "k", "q"]).unwrap();
+        assert!(validate_me_flags(&flags).is_ok());
+
+        let bad = parse_meta_flags(&["v"]).unwrap();
+        assert!(validate_me_flags(&bad).is_err());
+    }
+
+    #[test]
+    fn flag_validation_mg_rejects_bad_ttl() {
+        let bad = parse_meta_flags(&["Tabc"]).unwrap();
+        assert!(validate_mg_flags(&bad).is_err());
     }
 
     #[test]
