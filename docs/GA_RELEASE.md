@@ -124,15 +124,15 @@ The comparison covers two operation categories across three systems:
 | Category | Operations | Why It Matters |
 |---|---|---|
 | **Common key operations** | GET (hit/miss), SET (various sizes), DELETE | Core data-path throughput and latency for the most frequent memcached binary operations |
-| **JSON bridge path** | JSON.SET / JSON.GET (via RedCouch's Lua hex-encode bridge) | RedCouch translates memcached binary requests into Redis hash operations with Lua-based hex encoding; this is the primary data path and the dominant per-request cost |
+| **Hash/Lua hex-encode bridge path** | All RedCouch data operations use `HSET`/`HGETALL` via Lua scripts with hex encode/decode (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#storage-model) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#binary-safety)) | This bridge is the primary data path and the dominant per-request cost; there is no separate JSON-backed mode in the current architecture |
 
 ### 3.2 Systems Compared
 
 | System | Description | Data Path |
 |---|---|---|
-| **Couchbase OSS** | Couchbase Server's native memcached binary protocol endpoint (port 11210) | Direct KV engine access; items stored natively in Couchbase's storage layer |
-| **Redis OSS native** | Redis Open Source with native `GET`/`SET`/`DEL` commands | Direct Redis data structure access; single-threaded event loop, no bridge overhead |
-| **Redis + RedCouch** | Redis 8+ with the RedCouch module loaded; memcached binary clients connect on port 11210 | TCP listener → binary protocol parse → Lua script (hex encode/decode + hash operations) → Redis hash storage |
+| **Couchbase OSS** | Couchbase Server's native memcached binary protocol endpoint (port 11210) | Native KV engine (no in-repo performance data available) |
+| **Redis OSS native** | Redis Open Source with native `GET`/`SET`/`DEL` commands | Direct Redis data structure access; no protocol translation or hex encoding overhead |
+| **Redis + RedCouch** | Redis 8+ with the RedCouch module loaded; memcached binary clients connect on port 11210 | TCP listener → binary protocol parse → Lua script (hex encode/decode + `HSET`/`HGETALL`) → Redis hash storage (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)) |
 
 ### 3.3 RedCouch Measured Baselines
 
@@ -150,24 +150,26 @@ The following baselines are from the verified benchmark artifact `benchmarks/res
 
 ### 3.4 Expected Performance Positioning
 
-**Baseline expectation**: RedCouch throughput and latency are expected to fall **between** Couchbase OSS and Redis OSS native for equivalent operations, because:
+**Baseline expectation**: RedCouch throughput and latency are expected to fall **between** Couchbase OSS and Redis OSS native for equivalent operations. This expectation is based on the following in-repo evidence about RedCouch's architecture:
 
-1. **RedCouch adds bridge overhead on top of Redis**: each memcached binary request traverses TCP accept → binary frame parse → Lua script execution (hex encode/decode + hash field reads/writes) → response assembly. This overhead means RedCouch cannot match raw Redis `GET`/`SET`/`DEL` throughput, which operates directly on Redis data structures without protocol translation or hex encoding.
+1. **RedCouch adds bridge overhead on top of Redis**: each memcached binary request traverses TCP accept → binary frame parse → Lua script execution (hex encode/decode + hash field reads/writes) → response assembly (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)). This overhead means RedCouch is expected to be slower than raw Redis `GET`/`SET`/`DEL`, which operate directly on Redis data structures without protocol translation or hex encoding.
 
-2. **Redis's in-memory data path is faster than Couchbase's disk-backed KV engine for simple key operations**: Redis OSS native commands operate on in-memory hash tables with single-digit-microsecond latencies. Couchbase OSS serves the memcached binary protocol through its storage engine, which includes persistence, replication, and bucket management overhead absent in Redis's pure-memory model.
+2. **The dominant RedCouch cost is the Lua hex encode/decode bridge**: as documented in Section 4.3 (Remaining Hot Paths), every GET and binary-value mutation passes through Lua `string.format('%02x')` encoding and manual hex decode in Rust. This is the correctness-first approach for binary-safe value storage (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#binary-safety)).
 
-3. **The dominant RedCouch cost is the Lua hex encode/decode bridge**: as documented in Section 4.3 (Remaining Hot Paths), every GET and binary-value mutation passes through Lua `string.format('%02x')` encoding and manual hex decode in Rust. This is the correctness-first approach for binary-safe value storage but adds measurable per-request cost relative to both Redis native (no encoding needed) and Couchbase (native binary storage).
+3. **Per-request `ThreadSafeContext` / GIL serialization**: each Redis command acquires a `ThreadSafeContext` lock, serializing Redis access across all connection threads (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#threading-model)). This is the primary concurrency bottleneck, limiting scaling above ~4 clients to a plateau of ~35k ops/s for contended workloads (verified in stress artifact `benchmarks/results/stress_20260402_150543.json`).
 
-4. **Per-request `ThreadSafeContext` / GIL serialization**: each Redis command acquires a `ThreadSafeContext` lock, serializing Redis access across all connection threads. This is the primary concurrency bottleneck, limiting scaling above ~4 clients to a plateau of ~35k ops/s for contended workloads (verified in stress artifact `benchmarks/results/stress_20260402_150543.json`).
+**Note on Couchbase OSS positioning**: no Couchbase OSS benchmark data has been captured with this repository's harness. The expectation that RedCouch will be faster than Couchbase OSS for simple key operations is an architectural hypothesis — RedCouch runs on top of Redis's in-memory data structures — but this has not been measured. Direct comparison requires running the benchmark harness against a Couchbase memcached endpoint under identical conditions.
 
-### 3.5 Comparison Rationale by Operation
+### 3.5 Per-Operation Bridge Overhead (In-Repo Evidence)
 
-| Operation | RedCouch Path | Why Slower Than Redis Native | Why Faster Than Couchbase OSS |
-|---|---|---|---|
-| **GET (hit)** | Binary parse → Lua HGETALL + hex decode → response build | Hex decode + hash field access vs. direct `GET` | In-memory hash vs. Couchbase storage engine I/O |
-| **SET** | Binary parse → Lua CAS increment + hex encode + HSET + EXPIRE → response | Hex encode + multi-field hash write + CAS counter vs. direct `SET` | In-memory write vs. Couchbase persistence + replication |
-| **DELETE** | Binary parse → Lua CAS check + DEL → response | CAS-checked Lua script vs. direct `DEL` | In-memory delete vs. Couchbase tombstone + compaction |
-| **JSON bridge (implicit)** | All RedCouch data mutations use the Lua hex-encode bridge path; there is no separate "JSON mode" in the current architecture | The hex-encode bridge **is** the data path — it adds encoding overhead to every operation | Encoding cost is constant and small relative to Couchbase disk I/O |
+The following table documents RedCouch's per-operation data path and the additional overhead relative to Redis native commands. Couchbase OSS comparison data is not available in-repo and is omitted.
+
+| Operation | RedCouch Data Path (from `docs/ARCHITECTURE.md`) | Bridge Overhead vs. Redis Native |
+|---|---|---|
+| **GET (hit)** | Binary parse → Lua `HGETALL` + hex decode → response build | Hex decode + hash field access vs. direct `GET` on a simple key |
+| **SET** | Binary parse → Lua CAS counter `INCR` + hex encode + `HSET` + `EXPIRE` → response | Hex encode + multi-field hash write + CAS counter increment vs. direct `SET` |
+| **DELETE** | Binary parse → Lua CAS check + `DEL` → response | CAS-checked Lua script vs. direct `DEL` |
+| **All operations** | Every data mutation uses the Lua hex-encode bridge path; there is no separate mode | The hex-encode bridge adds encoding/decoding overhead to every request |
 
 ### 3.6 Measurement Methodology and Source of Truth
 
