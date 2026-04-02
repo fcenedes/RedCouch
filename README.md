@@ -1,14 +1,15 @@
 # RedCouch
 
-A Redis module that bridges **Couchbase memcached binary protocol** clients to Redis 8+, providing a memcached-compatible TCP endpoint backed by Redis data structures.
+A Redis module that bridges **memcached protocol** clients (binary and ASCII) to Redis 8+, providing a memcached-compatible TCP endpoint backed by Redis data structures.
 
-**Protocol**: Couchbase memcached binary protocol over TCP (port 11210)
+**Protocol**: Memcached binary + ASCII text protocol over TCP (port 11210)
 **Runtime**: Redis Open Source 8.x (verified on 8.4.0)
 **Module name**: `redcouch`
 
 ## References
 
 - [Couchbase memcached binary protocol](https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md)
+- [Memcached ASCII text protocol](https://github.com/memcached/memcached/blob/master/doc/protocol.txt)
 - [redis-module-rs](https://github.com/RedisLabsModules/redismodule-rs)
 
 ## Build
@@ -23,7 +24,7 @@ cargo build --release
 redis-server --loadmodule ./target/release/libred_couch.dylib
 ```
 
-The module starts a TCP listener on `127.0.0.1:11210` accepting memcached binary protocol clients.
+The module starts a TCP listener on `127.0.0.1:11210` accepting both memcached binary and ASCII text protocol clients. Protocol detection is automatic based on the first byte of each connection.
 
 ## Test
 
@@ -52,6 +53,7 @@ See [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) for the full GA release documenta
 - **Namespaced keys**: client keys prefixed with `rc:`, system keys under `redcouch:sys:*`
 - **Atomic mutations**: all CAS-sensitive operations use server-side Lua scripts
 - **Binary-safe values**: full binary round-trip via Lua hex encode/decode
+- **Dual protocol**: automatic binary/ASCII detection on first byte; ASCII text protocol covers all 19 standard commands (no auth in text mode)
 - **Safe defaults**: loopback-only bind, 1024 connection limit, 30s read / 10s write timeouts, 20 MiB frame cap
 
 ## Platform Support

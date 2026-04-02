@@ -3,7 +3,7 @@
 **Module**: `redcouch` (crate name `red_couch`, library `libred_couch`)
 **Version**: 0.1.0
 **Target runtime**: Redis Open Source 8.x (verified on Redis 8.4.0)
-**Protocol scope**: Couchbase memcached **binary protocol over TCP** (port 11210)
+**Protocol scope**: Memcached **binary + ASCII text protocol over TCP** (port 11210)
 **Date**: 2026-04-02
 
 ---
@@ -27,6 +27,27 @@
 | VERBOSITY | `VERBOSITY` | ✅ Implemented | Accepted, returns OK. Logging controlled by Redis module logging, not dynamic verbosity levels. |
 | SASL AUTH | `SASL_LIST_MECHS`, `SASL_AUTH`, `SASL_STEP` | ✅ Stub | Lists "PLAIN". Auth always succeeds. No credential enforcement. Allows SASL-requiring clients to connect. |
 | Unknown opcodes | Any unrecognized opcode byte | ✅ Handled | Returns `Unknown command` (status 0x0081) with raw opcode byte echoed. |
+
+### ASCII Text Protocol
+
+| Command | Status | Notes |
+|---|---|---|
+| `set`, `add`, `replace` | ✅ Implemented | Full `<key> <flags> <exptime> <bytes> [noreply]` syntax. |
+| `cas` | ✅ Implemented | `<key> <flags> <exptime> <bytes> <cas_unique> [noreply]` |
+| `append`, `prepend` | ✅ Implemented | Correct syntax: `<key> <bytes> [noreply]` (no flags/exptime). |
+| `get`, `gets` | ✅ Implemented | Multi-key. `gets` returns CAS. |
+| `gat`, `gats` | ✅ Implemented | Get-and-touch. `gats` returns CAS. |
+| `delete` | ✅ Implemented | `<key> [noreply]` |
+| `incr`, `decr` | ✅ Implemented | Returns NOT_FOUND for missing keys (no auto-create in ASCII). |
+| `touch` | ✅ Implemented | `<key> <exptime> [noreply]` |
+| `flush_all` | ✅ Implemented | Delay parameter accepted but not honored. |
+| `version` | ✅ Implemented | Returns `VERSION RedCouch 0.1.0`. |
+| `stats` | ✅ Implemented | Bare `stats` returns general stats. Unsupported groups (items, slabs, etc.) return empty `END`. |
+| `verbosity` | ✅ Implemented | Accepted and returns OK; no effect. |
+| `quit` | ✅ Implemented | Closes connection. |
+| **Auth** | ❌ Not supported | No SASL/auth in ASCII text mode (per memcached spec). |
+| **noreply** | ✅ Implemented | On malformed commands with `noreply`, error is suppressed (per spec). |
+| **Protocol detection** | Automatic | First byte `0x80` → binary; printable ASCII → text; `\r`/`\n` skipped. |
 
 ### Item Model
 
@@ -134,8 +155,7 @@ Malformed requests are handled with clean disconnect or timeout, not crashes:
 ### 3.7 Deferred Surfaces
 
 The following are **explicitly not in GA scope**:
-- ASCII text protocol
-- Meta protocol
+- Meta protocol (text-path routing in place for future support)
 - UDP transport
 - Couchbase bucket/vbucket management
 - Dynamic STAT groups (settings, items, slabs, conns)
@@ -182,7 +202,7 @@ The module registers as `redcouch` and starts a TCP listener on `127.0.0.1:11210
 # Build check
 cargo check
 
-# Run unit/protocol tests (60 tests)
+# Run unit/protocol tests (107 tests — 60 binary + 47 ASCII)
 cargo test
 
 # Run E2E integration tests (requires running Redis 8+ with module loaded)
@@ -216,7 +236,8 @@ cd benchmarks && bash run_stress_soak.sh
 
 | Category | Count | Location |
 |---|---|---|
-| Protocol unit tests | 60 | `src/protocol.rs` (via `cargo test`) |
+| Binary protocol unit tests | 60 | `src/protocol.rs` (via `cargo test`) |
+| ASCII protocol unit tests | 47 | `src/ascii.rs` (via `cargo test`) |
 | Integration/E2E tests | Suite | `tests/integration/test_binary_protocol.py` |
 | Benchmark workloads | 10+ profiles | `benchmarks/bench_binary_protocol.py` |
 | Stress/soak workloads | 7 phases | `benchmarks/stress_soak_validation.py` |
@@ -230,6 +251,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 ### Pre-Release
 
 - [x] **Binary protocol framing**: all 34 opcodes (0x00–0x22, excluding 0x1F) parsed and dispatched
+- [x] **ASCII text protocol**: 19 commands (set/add/replace/cas/append/prepend/get/gets/gat/gats/delete/incr/decr/touch/flush_all/version/stats/verbosity/quit)
 - [x] **Item model**: hash-per-item with binary-safe value, flags, CAS, and expiry
 - [x] **CAS correctness**: monotonic counter, atomic Lua-based mutations, CAS-check on store/delete
 - [x] **Expiry semantics**: relative (≤30 days), absolute (>30 days), persist (0), verified via GAT/GATQ
@@ -245,7 +267,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ### Testing
 
-- [x] **Unit tests pass**: `cargo test` — 60 tests, 0 failures
+- [x] **Unit tests pass**: `cargo test` — 107 tests (60 binary + 47 ASCII), 0 failures
 - [x] **E2E integration suite**: live Redis 8.4.0 binary-client verification
 - [x] **Benchmark baseline captured**: artifact with provenance tag `verifier-wave9b`
 - [x] **Stress/soak validation**: 7-phase suite, 0 errors, stable memory, clean malformed handling
@@ -257,7 +279,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 - [x] **Known limitations**: counter precision, append growth, hot paths, startup caveat, SASL stub
 - [x] **Configuration reference**: all runtime constants with values and sources
 - [x] **Benchmark provenance**: artifact filenames, git refs, platform details
-- [x] **Deferred surfaces**: ASCII, meta, UDP, bucket/vbucket explicitly listed as out of scope
+- [x] **Deferred surfaces**: meta, UDP, bucket/vbucket explicitly listed as out of scope
 
 ### Go / No-Go Decision
 
@@ -270,6 +292,6 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 | Connection churn resilience | ✅ | 169 conn/s, 0 failures |
 | Memory stability under soak | ✅ | 742 KB growth over 175k ops |
 | Known limitations documented | ✅ | Counter precision, append caveat, hot paths, startup, SASL |
-| Deferred work explicitly scoped | ✅ | ASCII/meta/UDP/bucket not in GA |
+| Deferred work explicitly scoped | ✅ | Meta/UDP/bucket not in GA |
 
-**Recommendation**: **GO** for GA release of the Couchbase memcached binary protocol over TCP scope on Redis 8+.
+**Recommendation**: **GO** for GA release of the memcached binary + ASCII text protocol over TCP scope on Redis 8+.

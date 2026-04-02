@@ -68,7 +68,7 @@ redis-server \
 REDIS_PID=$!
 
 # Wait for memcached listener
-echo "Waiting for binary-protocol listener on port $MEMCACHED_PORT..."
+echo "Waiting for protocol listener on port $MEMCACHED_PORT..."
 MAX_WAIT=10
 for i in $(seq 1 $MAX_WAIT); do
     if python3 -c "
