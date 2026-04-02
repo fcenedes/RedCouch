@@ -121,7 +121,7 @@ This triggers the release workflow (`.github/workflows/release.yml`) which:
 redis-cli MODULE UNLOAD redcouch
 ```
 
-Note: This stops the TCP listener and closes all memcached client connections.
+**Note:** RedCouch does not implement a module unload/deinit handler. The background TCP listener thread has no graceful shutdown path. Unloading via `MODULE UNLOAD` is **unverified** and may leave the listener thread orphaned. The recommended approach is to restart the Redis process to fully stop the module.
 
 ## Troubleshooting
 

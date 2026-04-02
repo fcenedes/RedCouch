@@ -174,7 +174,7 @@ hello
 
 # Get with key echo, flags, size
 mg mykey k f s
-HD kbXlrZXk= f0 s5
+HD kmykey f0 s5
 ```
 
 ### Meta Set Modes
@@ -251,25 +251,42 @@ MN Oping
 
 Binary protocol clients connect to the same port (11210). The protocol is auto-detected from the first byte (`0x80` = binary request magic).
 
-Use any memcached binary-protocol client library. For example, with Python's `pymemcache`:
+RedCouch's verified binary protocol test suite (`tests/integration/test_binary_protocol.py`) uses raw socket framing to exercise all 34 binary opcodes directly. Below is a simplified example of constructing a binary SET request and reading the response using raw sockets (adapted from the E2E test harness):
 
 ```python
-from pymemcache.client.base import Client
+import socket, struct
 
-client = Client(('127.0.0.1', 11210))
+MAGIC_REQ, MAGIC_RES, HDR = 0x80, 0x81, 24
+OP_SET, OP_GET = 0x01, 0x00
 
-# Basic operations
-client.set('key1', b'value1')
-result = client.get('key1')  # b'value1'
+def build_req(opcode, extras=b"", key=b"", value=b"", cas=0):
+    bl = len(extras) + len(key) + len(value)
+    hdr = struct.pack(">BBHBBHIIQ", MAGIC_REQ, opcode, len(key),
+                      len(extras), 0, 0, bl, 0, cas)
+    return hdr + extras + key + value
 
-# With flags
-client.set('key2', b'data', flags=0x1234)
+def read_resp(sock):
+    hdr = sock.recv(HDR)
+    magic, op, kl, el, dt, st, bl, opq, cas = struct.unpack(">BBHBBHIIQ", hdr)
+    body = b""
+    while len(body) < bl:
+        body += sock.recv(bl - len(body))
+    return st, cas, body[el + kl:]
 
-# Counters (binary protocol supports auto-create with initial value)
-client.incr('counter', 1)
+sock = socket.create_connection(("127.0.0.1", 11210), timeout=3)
 
-# Delete
-client.delete('key1')
+# SET key1 = b"hello" with flags=0, expiry=0
+extras = struct.pack(">II", 0, 0)  # flags (4 bytes) + expiry (4 bytes)
+sock.sendall(build_req(OP_SET, extras=extras, key=b"key1", value=b"hello"))
+status, cas, _ = read_resp(sock)
+assert status == 0  # success
 
-client.close()
+# GET key1
+sock.sendall(build_req(OP_GET, key=b"key1"))
+status, cas, value = read_resp(sock)
+assert status == 0 and value == b"hello"
+
+sock.close()
 ```
+
+See `tests/integration/test_binary_protocol.py` for the full verified binary test suite covering all opcodes.
