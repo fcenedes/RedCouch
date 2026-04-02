@@ -301,6 +301,7 @@ pub fn parse_request(buf: &[u8]) -> Option<(Request<'_>, usize)> {
 /// Write a complete binary-protocol response to `w` using a raw opcode byte.
 /// This is the low-level writer; prefer [`write_response`] when you have
 /// a known `Opcode`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_raw_response(
     w: &mut impl Write,
     opcode_byte: u8,
@@ -329,6 +330,7 @@ pub fn write_raw_response(
 }
 
 /// Write a complete binary-protocol response to `w`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_response(
     w: &mut impl Write,
     opcode: Opcode,

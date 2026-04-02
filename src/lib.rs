@@ -1528,69 +1528,66 @@ fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let stat_key = std::str::from_utf8(req.key).unwrap_or("");
 
-    match stat_key {
-        "" => {
-            // General stats.
-            let uptime = STARTUP_INSTANT
-                .get()
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0);
-            let pid = std::process::id();
+    if stat_key.is_empty() {
+        // General stats.
+        let uptime = STARTUP_INSTANT
+            .get()
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        let pid = std::process::id();
 
-            // Count current items via EVALSHA SCAN (NOSCRIPT fallback).
-            let curr_items: u64 = match with_ctx(|ctx| {
-                let keys_and_args: &[&[u8]] = &[b"0"];
-                eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
-            }) {
-                Ok(RedisValue::Integer(n)) => n as u64,
-                _ => 0,
-            };
+        // Count current items via EVALSHA SCAN (NOSCRIPT fallback).
+        let curr_items: u64 = match with_ctx(|ctx| {
+            let keys_and_args: &[&[u8]] = &[b"0"];
+            eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
+        }) {
+            Ok(RedisValue::Integer(n)) => n as u64,
+            _ => 0,
+        };
 
-            let stats: Vec<(&str, String)> = vec![
-                ("pid", pid.to_string()),
-                ("uptime", uptime.to_string()),
-                ("time", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-                    .to_string()),
-                ("version", "RedCouch 0.1.0".to_string()),
-                ("curr_items", curr_items.to_string()),
-                ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
-                ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
-                ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
-                ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
-                ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
-                ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
-                ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
-                ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
-                ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
-                ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
-                ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
-                ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
-                ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
-                ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
-                ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("max_connections", MAX_CONNECTIONS.to_string()),
-            ];
+        let stats: Vec<(&str, String)> = vec![
+            ("pid", pid.to_string()),
+            ("uptime", uptime.to_string()),
+            ("time", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .to_string()),
+            ("version", "RedCouch 0.1.0".to_string()),
+            ("curr_items", curr_items.to_string()),
+            ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+            ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+            ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
+            ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
+            ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
+            ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
+            ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
+            ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
+            ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
+            ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
+            ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
+            ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
+            ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
+            ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
+            ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
+            ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
+            ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
+            ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
+            ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
+            ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+            ("max_connections", MAX_CONNECTIONS.to_string()),
+        ];
 
-            for (name, value) in &stats {
-                write_response(
-                    out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
-                    &[], name.as_bytes(), value.as_bytes(),
-                )?;
-            }
+        for (name, value) in &stats {
+            write_response(
+                out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+                &[], name.as_bytes(), value.as_bytes(),
+            )?;
         }
-        // Unsupported stat groups — return just the terminator.
-        // This includes "settings", "items", "slabs", "conns", etc.
-        // These are intentionally unsupported in the GA release.
-        _ => {}
     }
+    // Unsupported stat groups — return just the terminator.
+    // This includes "settings", "items", "slabs", "conns", etc.
+    // These are intentionally unsupported in the GA release.
 
     // Terminator: empty key + empty value.
     write_response(

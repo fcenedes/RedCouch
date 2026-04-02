@@ -35,7 +35,7 @@ pub(crate) enum MetaCmd<'a> {
 #[derive(Debug)]
 pub(crate) enum MetaParseResult<'a> {
     Ok(MetaCmd<'a>),
-    ClientError(String),
+    ClientError(#[allow(dead_code)] String),
     /// ms needs a data block of this size
     NeedData(MetaCmd<'a>, u32),
 }

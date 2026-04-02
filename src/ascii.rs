@@ -44,7 +44,7 @@ enum RetrievalOp { Get, Gets, Gat, Gats }
 enum CmdParseResult<'a> {
     Ok(AsciiCmd<'a>),
     UnknownCommand,
-    ClientError(String),
+    ClientError(#[allow(dead_code)] String),
 }
 
 // ── Line extraction ─────────────────────────────────────────────────
@@ -286,7 +286,7 @@ fn parse_command_line(line: &[u8]) -> CmdParseResult<'_> {
 /// NOTE: `hex_encode` is currently unused — the Lua scripts handle
 /// hex encoding server-side.  Kept as a utility for potential future
 /// callers.  Not on any runtime hot path today.
-#[cfg(not(test))]
+#[allow(dead_code)]
 const HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
 
 /// Encode raw bytes as lowercase hex pairs.
@@ -296,7 +296,7 @@ const HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
 /// NOTE: This helper is currently unused at runtime — Lua scripts
 /// perform hex encoding inside Redis.  It is retained as a utility
 /// for potential future callers and is **not** on a hot path today.
-#[cfg(not(test))]
+#[allow(dead_code)]
 fn hex_encode(data: &[u8]) -> String {
     let mut s = String::with_capacity(data.len() * 2);
     for &b in data {
@@ -380,7 +380,7 @@ pub(crate) fn handle_ascii_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<
                         dispatch_meta_cmd(cmd, None, &mut out)?;
                     }
                     MetaParseResult::NeedData(cmd, datalen) => {
-                        if datalen > MAX_BODY_LEN as u32 {
+                        if datalen > MAX_BODY_LEN {
                             out.extend_from_slice(b"CLIENT_ERROR object too large for cache\r\n");
                             drain_data_block(sock, buf, datalen)?;
                         } else {
@@ -697,6 +697,7 @@ fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -
 
 /// Handle set/add/replace/cas.
 #[cfg(not(test))]
+#[allow(clippy::too_many_arguments)]
 fn ascii_store(
     op: StoreOp, key: &[u8], flags: u32, exptime: u32, cas: u64,
     value: &[u8], noreply: bool, out: &mut Vec<u8>,
