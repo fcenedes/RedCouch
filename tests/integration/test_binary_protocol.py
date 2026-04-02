@@ -22,8 +22,12 @@ OP_NOOP, OP_VERSION, OP_GETK = 0x0A, 0x0B, 0x0C
 OP_APPEND, OP_PREPEND = 0x0E, 0x0F
 OP_SETQ, OP_ADDQ, OP_DELETEQ = 0x11, 0x12, 0x14
 OP_APPENDQ, OP_PREPENDQ = 0x19, 0x1A
+OP_STAT = 0x10
+OP_VERBOSITY = 0x1B
 OP_TOUCH, OP_GAT, OP_GATQ = 0x1C, 0x1D, 0x1E
+OP_SASL_LIST_MECHS, OP_SASL_AUTH, OP_SASL_STEP = 0x20, 0x21, 0x22
 ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK = 0, 1, 2, 4, 5, 0x81
+ST_AUTH_ERROR = 0x20
 CAS_ZERO = 0
 HOST, PORT, TMO = "127.0.0.1", 11210, 3.0
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "16379"))
@@ -849,6 +853,140 @@ def test_flush():
     s.close()
 
 
+# ── 20. SASL auth ──────────────────────────────────────────────
+def test_sasl_list_mechs():
+    """SASL_LIST_MECHS returns 'PLAIN'."""
+    s = conn()
+    s.sendall(build_req(OP_SASL_LIST_MECHS, opaque=2000))
+    d = recv_min(s, HDR + 20)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("sasl_list_mechs_ok", r and r["status"] == ST_OK,
+        f"expected ST_OK, got {r}")
+    if r and r["status"] == ST_OK:
+        body = r["body"].decode("utf-8", errors="replace")
+        chk("sasl_list_mechs_plain", "PLAIN" in body,
+            f"expected 'PLAIN' in body, got {body!r}")
+
+
+def test_sasl_auth_plain():
+    """SASL_AUTH with PLAIN mechanism succeeds (GA: permissive)."""
+    s = conn()
+    # PLAIN payload: \0username\0password
+    plain_payload = b"\x00testuser\x00testpass"
+    s.sendall(build_req(OP_SASL_AUTH, opaque=2010,
+                        key=b"PLAIN", value=plain_payload))
+    d = recv_min(s, HDR + 20)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("sasl_auth_plain_ok", r and r["status"] == ST_OK,
+        f"expected ST_OK, got {r}")
+
+
+def test_sasl_auth_unsupported_mech():
+    """SASL_AUTH with unsupported mechanism → ST_AUTH_ERROR."""
+    s = conn()
+    s.sendall(build_req(OP_SASL_AUTH, opaque=2020,
+                        key=b"SCRAM-SHA-1", value=b"data"))
+    d = recv_min(s, HDR + 40)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("sasl_auth_bad_mech", r and r["status"] == ST_AUTH_ERROR,
+        f"expected ST_AUTH_ERROR(0x20), got {r}")
+
+
+def test_sasl_step():
+    """SASL_STEP → ST_AUTH_ERROR (PLAIN is single-step)."""
+    s = conn()
+    s.sendall(build_req(OP_SASL_STEP, opaque=2030,
+                        key=b"PLAIN", value=b"step_data"))
+    d = recv_min(s, HDR + 60)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("sasl_step_error", r and r["status"] == ST_AUTH_ERROR,
+        f"expected ST_AUTH_ERROR(0x20), got {r}")
+
+
+# ── 21. STAT ───────────────────────────────────────────────────
+def test_stat_general():
+    """STAT with empty key returns general stats terminated by empty response."""
+    s = conn()
+    # First do a SET so we have at least 1 item
+    k = tkey("stat_item")
+    s.sendall(build_req(OP_SET, opaque=2100, extras=set_extras(),
+                        key=k, value=b"statval"))
+    rd = recv_min(s, HDR)
+    parse_resp(rd)
+
+    # STAT with empty key
+    s.sendall(build_req(OP_STAT, opaque=2101))
+    # Read enough for multiple stat responses
+    d = recv_min(s, HDR * 30)
+    s.close()
+
+    # Parse all stat responses
+    stats = {}
+    off = 0
+    while True:
+        r, off = parse_resp(d, off)
+        if r is None:
+            break
+        chk_once = r["status"] == ST_OK and r["opcode"] == OP_STAT
+        if not chk_once:
+            break
+        key_start = r["extras_len"]
+        key_end = key_start + r["key_len"]
+        stat_key = r["body"][key_start:key_end].decode("utf-8", errors="replace")
+        stat_val = r["body"][key_end:].decode("utf-8", errors="replace")
+        if stat_key == "" and stat_val == "":
+            break  # terminator
+        stats[stat_key] = stat_val
+
+    chk("stat_has_pid", "pid" in stats, f"stats keys: {list(stats.keys())}")
+    chk("stat_has_version", "version" in stats, f"stats keys: {list(stats.keys())}")
+    chk("stat_has_uptime", "uptime" in stats, f"stats keys: {list(stats.keys())}")
+    chk("stat_has_curr_items", "curr_items" in stats,
+        f"stats keys: {list(stats.keys())}")
+    chk("stat_has_cmd_get", "cmd_get" in stats,
+        f"stats keys: {list(stats.keys())}")
+    chk("stat_has_cmd_set", "cmd_set" in stats,
+        f"stats keys: {list(stats.keys())}")
+    chk("stat_has_curr_connections", "curr_connections" in stats,
+        f"stats keys: {list(stats.keys())}")
+    if "curr_items" in stats:
+        chk("stat_curr_items_positive", int(stats["curr_items"]) > 0,
+            f"expected > 0, got {stats['curr_items']}")
+    if "version" in stats:
+        chk("stat_version_redcouch", "RedCouch" in stats["version"],
+            f"expected 'RedCouch', got {stats['version']}")
+
+
+def test_stat_unsupported_group():
+    """STAT with unsupported group key → just terminator."""
+    s = conn()
+    s.sendall(build_req(OP_STAT, opaque=2200, key=b"slabs"))
+    d = recv_min(s, HDR + 10)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("stat_unsupported_terminates",
+        r and r["status"] == ST_OK and r["key_len"] == 0 and r["body_len"] == 0,
+        f"expected empty terminator, got {r}")
+
+
+# ── 22. VERBOSITY ─────────────────────────────────────────────
+def test_verbosity():
+    """VERBOSITY → ST_OK (no-op)."""
+    s = conn()
+    # Verbosity extras: 4 bytes for verbosity level
+    verb_extras = struct.pack(">I", 2)
+    s.sendall(build_req(OP_VERBOSITY, opaque=2300, extras=verb_extras))
+    d = recv_min(s, HDR)
+    s.close()
+    r, _ = parse_resp(d)
+    chk("verbosity_ok", r and r["status"] == ST_OK,
+        f"expected ST_OK, got {r}")
+
+
 # ═════════════════════════════════════════════════════════════════
 # Runner
 # ═════════════════════════════════════════════════════════════════
@@ -883,6 +1021,14 @@ ALL_TESTS = [
     test_version,
     test_expiry_set_ttl,
     test_counter_edge_cases,
+    # Auth / Stats / Admin
+    test_sasl_list_mechs,
+    test_sasl_auth_plain,
+    test_sasl_auth_unsupported_mech,
+    test_sasl_step,
+    test_stat_general,
+    test_stat_unsupported_group,
+    test_verbosity,
     # Flush (run last — destroys data)
     test_flush,
 ]

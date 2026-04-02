@@ -15,6 +15,8 @@ pub const ST_NF: u16 = 0x0001;
 pub const ST_IX: u16 = 0x0002;
 pub const ST_ARGS: u16 = 0x0004;
 pub const ST_NOT_STORED: u16 = 0x0005;
+pub const ST_AUTH_ERROR: u16 = 0x0020;
+pub const ST_AUTH_CONTINUE: u16 = 0x0021;
 pub const ST_UNK: u16 = 0x0081;
 
 // ── CAS policy ──────────────────────────────────────────────────────
@@ -54,9 +56,14 @@ pub enum Opcode {
     FlushQ = 0x18,
     AppendQ = 0x19,
     PrependQ = 0x1a,
+    Stat = 0x10,
+    Verbosity = 0x1b,
     Touch = 0x1c,
     GAT = 0x1d,
     GATQ = 0x1e,
+    SaslListMechs = 0x20,
+    SaslAuth = 0x21,
+    SaslStep = 0x22,
 }
 
 impl Opcode {
@@ -89,9 +96,14 @@ impl Opcode {
             0x18 => FlushQ,
             0x19 => AppendQ,
             0x1a => PrependQ,
+            0x10 => Stat,
+            0x1b => Verbosity,
             0x1c => Touch,
             0x1d => GAT,
             0x1e => GATQ,
+            0x20 => SaslListMechs,
+            0x21 => SaslAuth,
+            0x22 => SaslStep,
             _ => return None,
         })
     }
@@ -391,6 +403,7 @@ mod tests {
             (0x0d, Opcode::GetKQ),
             (0x0e, Opcode::Append),
             (0x0f, Opcode::Prepend),
+            (0x10, Opcode::Stat),
             (0x11, Opcode::SetQ),
             (0x12, Opcode::AddQ),
             (0x13, Opcode::ReplaceQ),
@@ -401,9 +414,13 @@ mod tests {
             (0x18, Opcode::FlushQ),
             (0x19, Opcode::AppendQ),
             (0x1a, Opcode::PrependQ),
+            (0x1b, Opcode::Verbosity),
             (0x1c, Opcode::Touch),
             (0x1d, Opcode::GAT),
             (0x1e, Opcode::GATQ),
+            (0x20, Opcode::SaslListMechs),
+            (0x21, Opcode::SaslAuth),
+            (0x22, Opcode::SaslStep),
         ] {
             assert_eq!(Opcode::parse(byte), Some(expected));
             assert_eq!(expected as u8, byte);
@@ -435,6 +452,11 @@ mod tests {
         assert!(!Opcode::Set.is_quiet());
         assert!(!Opcode::Touch.is_quiet());
         assert!(!Opcode::Append.is_quiet());
+        assert!(!Opcode::Stat.is_quiet());
+        assert!(!Opcode::Verbosity.is_quiet());
+        assert!(!Opcode::SaslListMechs.is_quiet());
+        assert!(!Opcode::SaslAuth.is_quiet());
+        assert!(!Opcode::SaslStep.is_quiet());
         assert!(Opcode::GetK.includes_key());
         assert!(Opcode::GetKQ.includes_key());
         assert!(Opcode::GAT.includes_key());
@@ -460,6 +482,11 @@ mod tests {
         assert_eq!(Opcode::Noop.base(), Opcode::Noop);
         assert_eq!(Opcode::Touch.base(), Opcode::Touch);
         assert_eq!(Opcode::GAT.base(), Opcode::GAT);
+        assert_eq!(Opcode::Stat.base(), Opcode::Stat);
+        assert_eq!(Opcode::Verbosity.base(), Opcode::Verbosity);
+        assert_eq!(Opcode::SaslListMechs.base(), Opcode::SaslListMechs);
+        assert_eq!(Opcode::SaslAuth.base(), Opcode::SaslAuth);
+        assert_eq!(Opcode::SaslStep.base(), Opcode::SaslStep);
     }
 
     #[test]

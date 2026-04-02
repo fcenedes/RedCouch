@@ -22,6 +22,10 @@ use protocol::{
     CAS_ZERO,
 };
 #[cfg(not(test))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(test))]
+use std::time::Instant;
+#[cfg(not(test))]
 use std::{
     io::Read,
     net::{TcpListener, TcpStream},
@@ -50,6 +54,53 @@ const KEY_PREFIX: &[u8] = b"rc:";
 /// Redis key for the monotonic CAS counter.
 #[cfg(not(test))]
 const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
+
+/* ============================================================
+   Runtime stats counters
+   ========================================================= */
+
+#[cfg(not(test))]
+static STAT_CMD_GET: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_SET: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_FLUSH: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CMD_TOUCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_GET_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_GET_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DELETE_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DELETE_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_INCR_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_INCR_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DECR_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_DECR_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_MISSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CAS_BADVAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_CURR_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_TOTAL_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_AUTH_CMDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
+static STAT_AUTH_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Module startup time — set in `module_init`.
+#[cfg(not(test))]
+static STARTUP_INSTANT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// Build the namespaced Redis key for a client key.
 #[cfg(not(test))]
@@ -331,10 +382,13 @@ fn spawn_listener() {
             match stream {
                 Ok(mut sock) => {
                     sock.set_nodelay(true).ok();
+                    STAT_TOTAL_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                    STAT_CURR_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                     thread::spawn(move || {
                         if let Err(e) = handle_conn(&mut sock) {
                             eprintln!("[redcouch] connection error: {e}");
                         }
+                        STAT_CURR_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -430,6 +484,11 @@ fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         Append | Prepend => op_append_prepend(req, sock),
         Flush => op_flush(req, sock),
         Version => op_version(req, sock),
+        Stat => op_stat(req, sock),
+        Verbosity => op_verbosity(req, sock),
+        SaslListMechs => op_sasl_list_mechs(req, sock),
+        SaslAuth => op_sasl_auth(req, sock),
+        SaslStep => op_sasl_step(req, sock),
         Noop => {
             write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
             Ok(())
@@ -493,6 +552,7 @@ fn eval_str(v: &RedisValue) -> String {
 #[cfg(not(test))]
 fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(req.key);
 
     // Use Lua script to atomically fetch value, flags, CAS.
@@ -516,12 +576,15 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let status_code = eval_int(&fields[0]);
     if status_code == -1 {
         // NOT_FOUND
+        STAT_GET_MISSES.fetch_add(1, Ordering::Relaxed);
         if opcode.is_quiet() {
             return Ok(());
         }
         write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
+
+    STAT_GET_HITS.fetch_add(1, Ordering::Relaxed);
 
     // Value is hex-encoded by the Lua script to avoid redis-module
     // UTF-8 conversion panics on binary payloads.  Decode it here.
@@ -550,6 +613,7 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let base = opcode.base();
+    STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 8 {
         write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
@@ -604,9 +668,14 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         }
     };
 
+    // Track CAS stats for CAS-conditional stores.
+    let is_cas_op = req.hdr.cas != 0;
     match status_code {
         0 => {
             // Success
+            if is_cas_op {
+                STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            }
             if !opcode.is_quiet() {
                 write_response(
                     sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
@@ -615,10 +684,16 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         }
         -1 => {
             // NOT_FOUND (REPLACE on missing key, or CAS on missing key)
+            if is_cas_op {
+                STAT_CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         -2 => {
             // KEY_EXISTS (ADD on existing key, or CAS mismatch)
+            if is_cas_op {
+                STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed);
+            }
             write_simple_response(sock, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
@@ -658,6 +733,7 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
     match status_code {
         0 => {
+            STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
             // Deleted successfully.
             if opcode.is_quiet() {
                 return Ok(());
@@ -668,6 +744,7 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, new_cas, &[])?;
         }
         -1 => {
+            STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
             // NOT_FOUND
             write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
@@ -744,8 +821,14 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         }
     };
 
+    let is_incr = base == Opcode::Increment;
     match status_code {
         0 => {
+            if is_incr {
+                STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed);
+            }
             // Parse the counter value as u64.
             let counter_val: u64 = value_str.parse().unwrap_or(0);
             if !opcode.is_quiet() {
@@ -756,6 +839,11 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
             }
         }
         -1 => {
+            if is_incr {
+                STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             // NOT_FOUND (0xFFFFFFFF expiry)
             write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
@@ -777,6 +865,7 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 4 {
         write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
@@ -834,6 +923,8 @@ fn op_touch(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
+    STAT_CMD_TOUCH.fetch_add(1, Ordering::Relaxed);
 
     if req.extras.len() != 4 {
         write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
@@ -966,6 +1057,7 @@ fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn op_flush(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
+    STAT_CMD_FLUSH.fetch_add(1, Ordering::Relaxed);
 
     // Flush deletes all rc: prefixed keys.
     // Use SCAN + DEL pattern to avoid blocking on large keyspaces.
@@ -1006,6 +1098,174 @@ fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     Ok(())
 }
 
+/* ------------- SASL auth (GA: permissive, no auth enforcement) ------------- */
+
+/// SASL_LIST_MECHS — return the list of supported SASL mechanisms.
+/// GA behavior: returns "PLAIN" so clients know the mechanism is available.
+/// No actual authentication is enforced in this GA release.
+#[cfg(not(test))]
+fn op_sasl_list_mechs(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, b"PLAIN")?;
+    Ok(())
+}
+
+/// SASL_AUTH — accept PLAIN authentication.
+/// GA behavior: accepts any credentials and returns ST_OK.  This lets
+/// SASL-requiring clients (e.g. Couchbase SDKs) connect without error.
+/// When real auth enforcement is needed post-GA, this handler should
+/// validate credentials against a configured source.
+#[cfg(not(test))]
+fn op_sasl_auth(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
+
+    // The mechanism name is in the key field.
+    let mechanism = std::str::from_utf8(req.key).unwrap_or("");
+    if mechanism != "PLAIN" {
+        STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
+        write_simple_response(
+            sock, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+            b"Unsupported SASL mechanism",
+        )?;
+        return Ok(());
+    }
+
+    // PLAIN auth: accept any credentials for GA.
+    // The value field contains the PLAIN payload: \0<username>\0<password>
+    write_simple_response(
+        sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        b"Authenticated",
+    )?;
+    Ok(())
+}
+
+/// SASL_STEP — continue a multi-step SASL handshake.
+/// GA behavior: PLAIN is single-step, so any SASL_STEP is unexpected.
+/// Return ST_AUTH_ERROR to signal the handshake is already complete.
+#[cfg(not(test))]
+fn op_sasl_step(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
+    STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
+    write_simple_response(
+        sock, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+        b"SASL step not expected for PLAIN mechanism",
+    )?;
+    Ok(())
+}
+
+/* ------------- STAT ------------- */
+
+/// Lua script to count current items (rc:* keys).
+#[cfg(not(test))]
+const LUA_COUNT_ITEMS: &str = r#"
+local cursor = '0'
+local count = 0
+repeat
+  local result = redis.call('SCAN', cursor, 'MATCH', 'rc:*', 'COUNT', 1000)
+  cursor = result[1]
+  count = count + #result[2]
+until cursor == '0'
+return count
+"#;
+
+/// STAT — return server statistics.
+///
+/// Binary STAT protocol:
+/// - Each stat is a response with opcode=STAT, the stat name in the key
+///   field, and the stat value in the value field.
+/// - The sequence ends with a response that has empty key and empty value.
+/// - If the request key is empty, return general stats.
+/// - If the request key names a group we don't support, return empty
+///   (just the terminator).
+#[cfg(not(test))]
+fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let stat_key = std::str::from_utf8(req.key).unwrap_or("");
+
+    match stat_key {
+        "" => {
+            // General stats.
+            let uptime = STARTUP_INSTANT
+                .get()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let pid = std::process::id();
+
+            // Count current items via Lua SCAN.
+            let curr_items: u64 = match with_ctx(|ctx| {
+                let args: &[&[u8]] = &[LUA_COUNT_ITEMS.as_bytes(), b"0"];
+                ctx.call("EVAL", args)
+            }) {
+                Ok(RedisValue::Integer(n)) => n as u64,
+                _ => 0,
+            };
+
+            let stats: Vec<(&str, String)> = vec![
+                ("pid", pid.to_string()),
+                ("uptime", uptime.to_string()),
+                ("time", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .to_string()),
+                ("version", "RedCouch 0.1.0".to_string()),
+                ("curr_items", curr_items.to_string()),
+                ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
+                ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
+                ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
+                ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
+                ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
+                ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
+                ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
+                ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
+                ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
+                ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
+                ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
+                ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
+                ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
+                ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
+                ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
+                ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
+                ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
+            ];
+
+            for (name, value) in &stats {
+                write_response(
+                    sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+                    &[], name.as_bytes(), value.as_bytes(),
+                )?;
+            }
+        }
+        // Unsupported stat groups — return just the terminator.
+        // This includes "settings", "items", "slabs", "conns", etc.
+        // These are intentionally unsupported in the GA release.
+        _ => {}
+    }
+
+    // Terminator: empty key + empty value.
+    write_response(
+        sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        &[], &[], &[],
+    )?;
+    Ok(())
+}
+
+/* ------------- VERBOSITY ------------- */
+
+/// VERBOSITY — set server verbosity level.
+/// GA behavior: accept and return ST_OK as a no-op.  RedCouch does not
+/// currently support dynamic verbosity levels; logging is controlled
+/// by Redis module logging.
+#[cfg(not(test))]
+fn op_verbosity(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+    Ok(())
+}
 
 
 /* ============================================================
@@ -1014,6 +1274,7 @@ fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
 #[cfg(not(test))]
 fn module_init(ctx: &Context, _args: &[RedisString]) -> Status {
+    let _ = STARTUP_INSTANT.set(Instant::now());
     LISTENER.call_once(spawn_listener);
     ctx.log_notice("redcouch: listener started on 11210");
     Status::Ok
