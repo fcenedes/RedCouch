@@ -15,8 +15,10 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
 #[cfg(not(test))]
 use protocol::{
-    Opcode, Request, parse_request, write_response, write_simple_response,
+    Opcode, Request, try_parse_request, ParseResult,
+    write_response, write_simple_response, write_error_for_raw_opcode,
     ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK,
+    CAS_ZERO, CAS_PLACEHOLDER,
 };
 #[cfg(not(test))]
 use std::{
@@ -102,9 +104,23 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
             Err(e) => return Err(e.into()),
         }
 
-        while let Some((req, used)) = parse_request(&buf) {
-            handle(req, sock)?;
-            buf.advance(used);
+        loop {
+            match try_parse_request(&buf) {
+                ParseResult::Ok((req, used)) => {
+                    handle(req, sock)?;
+                    buf.advance(used);
+                }
+                ParseResult::Incomplete => break,
+                ParseResult::BadMagic => {
+                    eprintln!("[cbbridge] bad magic byte, closing connection");
+                    return Ok(());
+                }
+                ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
+                    eprintln!("[cbbridge] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
+                    write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
+                    buf.advance(bytes_to_skip);
+                }
+            }
         }
     }
 }
@@ -115,19 +131,45 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
 
 #[cfg(not(test))]
 fn handle(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = match req.hdr.opcode {
+        Some(op) => op,
+        None => {
+            // Unknown opcode — respond with ST_UNK and continue.
+            write_error_for_raw_opcode(
+                sock,
+                req.hdr.opcode_byte,
+                ST_UNK,
+                req.hdr.opaque,
+                b"Unknown command",
+            )?;
+            return Ok(());
+        }
+    };
+
     use Opcode::*;
-    match req.hdr.opcode {
-        Get | GetK | GetQ | GetKQ => op_get(req, sock),
+    match opcode.base() {
+        Get | GetK => op_get(req, sock),
         Set | Add | Replace => op_store(req, sock),
         Delete => op_delete(req, sock),
         Increment | Decrement => op_counter(req, sock),
         Noop => {
-            write_simple_response(sock, req.hdr.opcode, ST_OK, req.hdr.opaque, 0, &[])?;
+            write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
             Ok(())
         }
         Quit => {
-            write_simple_response(sock, req.hdr.opcode, ST_OK, req.hdr.opaque, 0, &[])?;
+            if !opcode.is_quiet() {
+                write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
+            }
             Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into())
+        }
+        // base() maps all quiet variants to their loud base, so the
+        // remaining arms are unreachable.
+        _ => {
+            write_error_for_raw_opcode(
+                sock, req.hdr.opcode_byte, ST_UNK, req.hdr.opaque,
+                b"Unknown command",
+            )?;
+            Ok(())
         }
     }
 }
@@ -143,16 +185,18 @@ fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
 /* ------------ GET / GETQ / GETK / GETKQ ------------ */
 #[cfg(not(test))]
 fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    // Safety: callers only reach here when opcode is Some.
+    let opcode = req.hdr.opcode.unwrap();
     let key = std::str::from_utf8(req.key)?;
     let reply = with_ctx(|ctx| ctx.call("JSON.GET", &[key]))
         .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
-    let is_quiet = req.hdr.opcode.is_quiet();
     if matches!(reply, RedisValue::Null) {
-        if is_quiet {
+        if opcode.is_quiet() {
+            // Quiet GET variants suppress miss responses.
             return Ok(());
         } else {
-            write_simple_response(sock, req.hdr.opcode, ST_NF, req.hdr.opaque, 0, &[])?;
+            write_simple_response(sock, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
             return Ok(());
         }
     }
@@ -161,7 +205,7 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         reply.try_into().map_err(|e: RedisError| BridgeErr::Redis(e.to_string()))?;
 
     let extras = 0u32.to_be_bytes();
-    let key_part = if req.hdr.opcode.includes_key() {
+    let key_part = if opcode.includes_key() {
         req.key
     } else {
         &[]
@@ -169,10 +213,10 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 
     write_response(
         sock,
-        req.hdr.opcode,
+        opcode,
         ST_OK,
         req.hdr.opaque,
-        1, // fake CAS
+        CAS_PLACEHOLDER,
         &extras,
         key_part,
         json.as_bytes(),
@@ -180,11 +224,15 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     Ok(())
 }
 
-/* ------ SET / ADD / REPLACE ------ */
+/* ------ SET / ADD / REPLACE (and quiet variants) ------ */
 #[cfg(not(test))]
 fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+
     if req.extras.len() != 8 {
-        write_simple_response(sock, req.hdr.opcode, ST_ARGS, req.hdr.opaque, 0, &[])?;
+        // Always send error even for quiet variants.
+        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -201,14 +249,15 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
 
-    let (do_it, err_if_skip) = match req.hdr.opcode {
+    let (do_it, err_if_skip) = match base {
         Opcode::Set => (true, ST_OK),
         Opcode::Add => (exists == 0, ST_IX),
         Opcode::Replace => (exists != 0, ST_NF),
         _ => (false, ST_UNK),
     };
     if !do_it {
-        write_simple_response(sock, req.hdr.opcode, err_if_skip, req.hdr.opaque, 0, &[])?;
+        // Error responses are always sent, even for quiet variants.
+        write_simple_response(sock, opcode, err_if_skip, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -217,13 +266,18 @@ fn op_store(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     if expiry != 0 {
         with_ctx(|ctx| ctx.call("EXPIRE", &[key, &expiry.to_string()])).ok();
     }
-    write_response(sock, req.hdr.opcode, ST_OK, req.hdr.opaque, 1, &[], &[], &[])?;
+
+    // Quiet variants suppress success responses.
+    if !opcode.is_quiet() {
+        write_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_PLACEHOLDER, &[], &[], &[])?;
+    }
     Ok(())
 }
 
-/* ------------- DELETE ------------- */
+/* ------------- DELETE / DELETEQ ------------- */
 #[cfg(not(test))]
 fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
     let key = std::str::from_utf8(req.key)?;
     let deleted = match with_ctx(|ctx| ctx.call("DEL", &[key])) {
         Ok(RedisValue::Integer(n)) => n,
@@ -233,22 +287,24 @@ fn op_delete(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         }
         Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
-    write_simple_response(
-        sock,
-        req.hdr.opcode,
-        if deleted == 1 { ST_OK } else { ST_NF },
-        req.hdr.opaque,
-        0,
-        &[],
-    )?;
+
+    let status = if deleted == 1 { ST_OK } else { ST_NF };
+    // Quiet variants suppress success; errors are always sent.
+    if opcode.is_quiet() && status == ST_OK {
+        return Ok(());
+    }
+    write_simple_response(sock, opcode, status, req.hdr.opaque, CAS_ZERO, &[])?;
     Ok(())
 }
 
-/* --------- INCR / DECR --------- */
+/* --------- INCR / DECR (and quiet variants) --------- */
 #[cfg(not(test))]
 fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
+    let opcode = req.hdr.opcode.unwrap();
+    let base = opcode.base();
+
     if req.extras.len() != 20 {
-        write_simple_response(sock, req.hdr.opcode, ST_ARGS, req.hdr.opaque, 0, &[])?;
+        write_simple_response(sock, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO, &[])?;
         return Ok(());
     }
 
@@ -257,7 +313,7 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let expiry  = BigEndian::read_u32(&req.extras[16..20]);
     let key     = std::str::from_utf8(req.key)?;
 
-    let signed = if req.hdr.opcode == Opcode::Decrement {
+    let signed = if base == Opcode::Decrement {
         -(delta as i64)
     } else {
         delta as i64
@@ -280,16 +336,19 @@ fn op_counter(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         Err(e) => return Err(BridgeErr::Redis(e.to_string())),
     };
 
-    write_response(
-        sock,
-        req.hdr.opcode,
-        ST_OK,
-        req.hdr.opaque,
-        1,
-        &[],
-        &[],
-        &new_val.to_be_bytes(),
-    )?;
+    // Quiet variants suppress success responses.
+    if !opcode.is_quiet() {
+        write_response(
+            sock,
+            opcode,
+            ST_OK,
+            req.hdr.opaque,
+            CAS_PLACEHOLDER,
+            &[],
+            &[],
+            &new_val.to_be_bytes(),
+        )?;
+    }
     Ok(())
 }
 
