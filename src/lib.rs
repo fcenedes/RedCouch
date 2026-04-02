@@ -9,6 +9,7 @@
 #![allow(clippy::needless_return)]
 
 pub mod protocol;
+pub mod ascii;
 
 #[cfg(not(test))]
 use byteorder::{BigEndian, ByteOrder};
@@ -19,7 +20,7 @@ use protocol::{
     Opcode, Request, try_parse_request, ParseResult,
     write_response, write_simple_response, write_error_for_raw_opcode,
     ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK,
-    CAS_ZERO, MAX_BODY_LEN,
+    CAS_ZERO, MAX_BODY_LEN, MAGIC_REQ,
 };
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,62 +50,62 @@ use redis_module::{
 /// Prefix for user item keys in Redis.  Client key `foo` maps to
 /// Redis key `rc:foo`.
 #[cfg(not(test))]
-const KEY_PREFIX: &[u8] = b"rc:";
+pub(crate) const KEY_PREFIX: &[u8] = b"rc:";
 
 /// Redis key for the monotonic CAS counter.
 #[cfg(not(test))]
-const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
+pub(crate) const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
 
 /* ============================================================
    Runtime stats counters
    ========================================================= */
 
 #[cfg(not(test))]
-static STAT_CMD_GET: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CMD_GET: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CMD_SET: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CMD_SET: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CMD_FLUSH: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CMD_FLUSH: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CMD_TOUCH: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CMD_TOUCH: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_GET_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_GET_HITS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_GET_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_GET_MISSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_DELETE_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_DELETE_HITS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_DELETE_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_DELETE_MISSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_INCR_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_INCR_HITS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_INCR_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_INCR_MISSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_DECR_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_DECR_HITS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_DECR_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_DECR_MISSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CAS_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CAS_HITS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CAS_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CAS_MISSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CAS_BADVAL: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CAS_BADVAL: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_CURR_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_CURR_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_TOTAL_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_TOTAL_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_AUTH_CMDS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_AUTH_CMDS: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
-static STAT_AUTH_ERRORS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_AUTH_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Module startup time — set in `module_init`.
 #[cfg(not(test))]
-static STARTUP_INSTANT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+pub(crate) static STARTUP_INSTANT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// Build the namespaced Redis key for a client key.
 #[cfg(not(test))]
-fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
+pub(crate) fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
     let mut rk = Vec::with_capacity(KEY_PREFIX.len() + client_key.len());
     rk.extend_from_slice(KEY_PREFIX);
     rk.extend_from_slice(client_key);
@@ -114,7 +115,7 @@ fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
 /// Decode a hex string (pairs of hex digits) into raw bytes.
 /// Returns an empty Vec if the input is not valid hex.
 #[cfg(not(test))]
-fn hex_decode(hex: &str) -> Vec<u8> {
+pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
     if hex.len() % 2 != 0 {
         return Vec::new();
     }
@@ -154,7 +155,7 @@ fn hex_decode(hex: &str) -> Vec<u8> {
 /// Returns: {status, new_cas_string}
 ///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS
 #[cfg(not(test))]
-const LUA_STORE: &str = r#"
+pub(crate) const LUA_STORE: &str = r#"
 local op = ARGV[1]
 local exists = redis.call('EXISTS', KEYS[1])
 if op == 'add' and exists == 1 then return {-2, ''} end
@@ -186,7 +187,7 @@ return {0, tostring(new_cas)}
 ///   status: 0=OK, -1=NOT_FOUND
 ///   hex_value: value bytes encoded as lowercase hex pairs
 #[cfg(not(test))]
-const LUA_GET: &str = r#"
+pub(crate) const LUA_GET: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
 local v = redis.call('HGET', KEYS[1], 'v')
 local f = redis.call('HGET', KEYS[1], 'f')
@@ -205,7 +206,7 @@ return {0, hex, f, c}
 ///
 /// Returns: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
 #[cfg(not(test))]
-const LUA_DELETE: &str = r#"
+pub(crate) const LUA_DELETE: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
 local req_cas = ARGV[1]
 if req_cas ~= '0' then
@@ -235,7 +236,7 @@ return 0
 /// Returns: {status, value_string, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND, -3=NON_NUMERIC
 #[cfg(not(test))]
-const LUA_COUNTER: &str = r#"
+pub(crate) const LUA_COUNTER: &str = r#"
 local exists = redis.call('EXISTS', KEYS[1])
 if exists == 0 then
   local exp = tonumber(ARGV[4])
@@ -273,7 +274,7 @@ return {0, str_val, tostring(new_cas)}
 /// Returns: {status, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND
 #[cfg(not(test))]
-const LUA_TOUCH: &str = r#"
+pub(crate) const LUA_TOUCH: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, ''} end
 local exp = tonumber(ARGV[1])
 if exp ~= nil and exp > 0 then
@@ -295,7 +296,7 @@ return {0, tostring(new_cas)}
 /// Returns: {status, hex_value, flags_string, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND
 #[cfg(not(test))]
-const LUA_GAT: &str = r#"
+pub(crate) const LUA_GAT: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
 local exp = tonumber(ARGV[1])
 if exp ~= nil and exp > 0 then
@@ -323,7 +324,7 @@ return {0, hex, f, tostring(new_cas)}
 /// Returns: {status, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
 #[cfg(not(test))]
-const LUA_APPEND: &str = r#"
+pub(crate) const LUA_APPEND: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
 local req_cas = ARGV[2]
 if req_cas ~= '0' then
@@ -347,7 +348,7 @@ return {0, tostring(new_cas)}
 /// Returns: {status, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND, -2=KEY_EXISTS (CAS mismatch)
 #[cfg(not(test))]
-const LUA_PREPEND: &str = r#"
+pub(crate) const LUA_PREPEND: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-5, ''} end
 local req_cas = ARGV[2]
 if req_cas ~= '0' then
@@ -375,7 +376,7 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:11210";
 /// Maximum number of concurrent client connections.  Beyond this limit
 /// new connections are accepted and immediately closed with an error log.
 #[cfg(not(test))]
-const MAX_CONNECTIONS: u64 = 1024;
+pub(crate) const MAX_CONNECTIONS: u64 = 1024;
 
 /// Socket read timeout — how long a connection can be idle before being
 /// closed.  30 seconds is generous for interactive memcached workloads.
@@ -394,7 +395,7 @@ const MAX_READ_BUF: usize = (MAX_BODY_LEN as usize) + protocol::HEADER_LEN + 409
 
 /// Connection rejection counter.
 #[cfg(not(test))]
-static STAT_REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STAT_REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(test))]
 static LISTENER: Once = Once::new();
@@ -470,18 +471,63 @@ fn spawn_listener() {
 
 #[cfg(not(test))]
 #[derive(thiserror::Error, Debug)]
-enum BridgeErr {
+pub(crate) enum BridgeErr {
     #[error("io {0}")]
     Io(#[from] std::io::Error),
     #[error("redis {0}")]
     Redis(String),
 }
 #[cfg(not(test))]
-type Br<T> = Result<T, BridgeErr>;
+pub(crate) type Br<T> = Result<T, BridgeErr>;
 
 #[cfg(not(test))]
 fn handle_conn(sock: &mut TcpStream) -> Br<()> {
     let mut buf = BytesMut::with_capacity(16384);
+
+    // Read the first byte(s) to detect the protocol.
+    // Loop to skip leading \r\n (empty lines before a real command).
+    loop {
+        if buf.is_empty() {
+            let mut tmp = [0u8; 16384];
+            match sock.read(&mut tmp) {
+                Ok(0) => return Ok(()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Skip leading \r and \n bytes (empty lines before protocol detection).
+        while !buf.is_empty() && (buf[0] == b'\r' || buf[0] == b'\n') {
+            buf.advance(1);
+        }
+        if buf.is_empty() {
+            continue; // Read more data
+        }
+
+        let first = buf[0];
+        if first == MAGIC_REQ {
+            // Binary protocol
+            return handle_binary_conn(sock, &mut buf);
+        } else if first.is_ascii_graphic() || first == b' ' {
+            // Text protocol (ASCII or future meta)
+            return ascii::handle_ascii_conn(sock, &mut buf);
+        } else {
+            // Unknown protocol byte — close.
+            eprintln!("[redcouch] unknown protocol byte 0x{first:02x}, closing");
+            return Ok(());
+        }
+    }
+}
+
+/// Binary protocol connection handler — the original request/response loop.
+#[cfg(not(test))]
+fn handle_binary_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<()> {
     // Response write buffer — all responses for a batch of parsed requests
     // are collected here and flushed in a single write_all() call, reducing
     // the number of syscalls from O(responses * 4) to O(1) per read cycle.
@@ -494,22 +540,24 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
             return Ok(());
         }
 
-        let mut tmp = [0u8; 16384];
-        match sock.read(&mut tmp) {
-            Ok(0) => return Ok(()),
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                // Socket read timeout — close the idle connection.
-                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+        // If we don't have enough data from the initial read, read more.
+        if buf.is_empty() {
+            let mut tmp = [0u8; 16384];
+            match sock.read(&mut tmp) {
+                Ok(0) => return Ok(()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         }
 
         loop {
-            match try_parse_request(&buf) {
+            match try_parse_request(buf) {
                 ParseResult::Ok((req, used)) => {
                     handle(req, &mut out)?;
                     buf.advance(used);
@@ -543,6 +591,20 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
             use std::io::Write;
             sock.write_all(&out)?;
             out.clear();
+        }
+
+        // Read more data for the next iteration.
+        let mut tmp = [0u8; 16384];
+        match sock.read(&mut tmp) {
+            Ok(0) => return Ok(()),
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -608,7 +670,7 @@ fn handle(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
 
 /* ------------ helpers to run a Redis command -------------- */
 #[cfg(not(test))]
-fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
+pub(crate) fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
     let tsc = ThreadSafeContext::<DetachedFromClient>::new();
     let guard = tsc.lock();
     f(&guard)
@@ -618,13 +680,13 @@ fn with_ctx<T>(f: impl Fn(&redis_module::Context) -> T) -> T {
 /// `Ok(RedisValue::StaticError(...))` pattern from redis-module 2.0.7
 /// when `RedisModule_Call` returns NULL).
 #[cfg(not(test))]
-fn is_redis_error(v: &RedisValue) -> bool {
+pub(crate) fn is_redis_error(v: &RedisValue) -> bool {
     matches!(v, RedisValue::StaticError(_))
 }
 
 /// Extract an integer from a Redis EVAL array result element.
 #[cfg(not(test))]
-fn eval_int(v: &RedisValue) -> i64 {
+pub(crate) fn eval_int(v: &RedisValue) -> i64 {
     match v {
         RedisValue::Integer(n) => *n,
         _ => 0,
@@ -633,7 +695,7 @@ fn eval_int(v: &RedisValue) -> i64 {
 
 /// Extract a bulk string from a Redis EVAL array result element.
 #[cfg(not(test))]
-fn eval_str(v: &RedisValue) -> String {
+pub(crate) fn eval_str(v: &RedisValue) -> String {
     match v {
         RedisValue::BulkString(s) => s.clone(),
         RedisValue::BulkRedisString(s) => s.to_string_lossy(),
@@ -856,7 +918,7 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
 
 /// Get the next CAS value from the Redis counter.
 #[cfg(not(test))]
-fn get_next_cas() -> u64 {
+pub(crate) fn get_next_cas() -> u64 {
     match with_ctx(|ctx| ctx.call("INCR", &[CAS_COUNTER_KEY])) {
         Ok(RedisValue::Integer(n)) => n as u64,
         _ => 1,
@@ -1258,7 +1320,7 @@ fn op_sasl_step(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
 
 /// Lua script to count current items (rc:* keys).
 #[cfg(not(test))]
-const LUA_COUNT_ITEMS: &str = r#"
+pub(crate) const LUA_COUNT_ITEMS: &str = r#"
 local cursor = '0'
 local count = 0
 repeat
