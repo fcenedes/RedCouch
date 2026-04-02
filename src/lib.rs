@@ -990,6 +990,9 @@ fn op_gat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 fn op_append_prepend(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let base = opcode.base();
+    // Append/Prepend are mutation commands; count under cmd_set
+    // (matches standard memcached stat semantics).
+    STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
 
     // Append/Prepend: no extras expected, key + value in body.
     if !req.extras.is_empty() {
@@ -1106,6 +1109,7 @@ fn op_version(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 #[cfg(not(test))]
 fn op_sasl_list_mechs(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
+    STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
     write_simple_response(sock, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, b"PLAIN")?;
     Ok(())
 }
