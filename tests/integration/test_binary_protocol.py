@@ -483,6 +483,40 @@ def test_incr_decr():
     s.close()
 
 
+# ── 12. Binary-safe value round-trip ──────────────────────────────
+def test_binary_value_roundtrip():
+    """SET/GET round-trips arbitrary non-UTF8 binary data."""
+    s = conn()
+    k = tkey("binval")
+    # Non-UTF8 payload: NUL, 'A', 0xFF, 'B'
+    binary_val = b"\x00\x41\xFF\x42"
+    FLAGS = 0x12345678
+    s.sendall(build_req(OP_SET, opaque=1000, extras=set_extras(flags=FLAGS),
+                        key=k, value=binary_val))
+    rd = recv_min(s, HDR)
+    r1, _ = parse_resp(rd)
+    chk("binary_set_ok", r1 and r1["status"] == ST_OK, f"SET: {r1}")
+    set_cas = r1["cas"] if r1 else 0
+
+    # GET the same key
+    s.sendall(build_req(OP_GET, opaque=1001, key=k))
+    gd = recv_min(s, HDR + 4 + len(binary_val) + 20)
+    s.close()
+    r2, _ = parse_resp(gd)
+    chk("binary_get_ok", r2 and r2["status"] == ST_OK,
+        f"GET: {r2}")
+    if r2 and r2["status"] == ST_OK:
+        got_extras = r2["body"][:r2["extras_len"]]
+        got_val = r2["body"][r2["extras_len"]:]
+        got_flags = struct.unpack(">I", got_extras)[0] if len(got_extras) == 4 else None
+        chk("binary_value_match", got_val == binary_val,
+            f"expected {binary_val!r}, got {got_val!r}")
+        chk("binary_flags_match", got_flags == FLAGS,
+            f"expected 0x{FLAGS:08x}, got {got_flags!r}")
+        chk("binary_cas_match", r2["cas"] == set_cas,
+            f"GET CAS={r2['cas']}, SET CAS={set_cas}")
+
+
 # ═════════════════════════════════════════════════════════════════
 # Runner
 # ═════════════════════════════════════════════════════════════════
@@ -508,6 +542,8 @@ ALL_TESTS = [
     test_cas_conditional_set,
     # Counter operations
     test_incr_decr,
+    # Binary-safe data path
+    test_binary_value_roundtrip,
 ]
 
 if __name__ == "__main__":

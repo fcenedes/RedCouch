@@ -60,6 +60,33 @@ fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
     rk
 }
 
+/// Decode a hex string (pairs of hex digits) into raw bytes.
+/// Returns an empty Vec if the input is not valid hex.
+#[cfg(not(test))]
+fn hex_decode(hex: &str) -> Vec<u8> {
+    if hex.len() % 2 != 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = match bytes[i] {
+            b'0'..=b'9' => bytes[i] - b'0',
+            b'a'..=b'f' => bytes[i] - b'a' + 10,
+            b'A'..=b'F' => bytes[i] - b'A' + 10,
+            _ => return Vec::new(),
+        };
+        let lo = match bytes[i + 1] {
+            b'0'..=b'9' => bytes[i + 1] - b'0',
+            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+            _ => return Vec::new(),
+        };
+        out.push((hi << 4) | lo);
+    }
+    out
+}
+
 /* ============================================================
    Lua scripts for atomic operations
    ========================================================= */
@@ -99,12 +126,14 @@ end
 return {0, tostring(new_cas)}
 "#;
 
-/// Lua script for GET — returns value, flags, CAS as an array.
+/// Lua script for GET — returns value as hex-encoded string to avoid
+/// redis-module UTF-8 conversion panics on binary payloads.
 ///
 /// KEYS[1] = item key
 ///
-/// Returns: {status, value, flags_string, cas_string}
+/// Returns: {status, hex_value, flags_string, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND
+///   hex_value: value bytes encoded as lowercase hex pairs
 #[cfg(not(test))]
 const LUA_GET: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
@@ -114,7 +143,8 @@ local c = redis.call('HGET', KEYS[1], 'c')
 if v == false then v = '' end
 if f == false then f = '0' end
 if c == false then c = '0' end
-return {0, v, f, c}
+local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
+return {0, hex, f, c}
 "#;
 
 /// Lua script for DELETE with CAS check.
@@ -382,17 +412,10 @@ fn op_get(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
         return Ok(());
     }
 
-    // Extract value (as raw bytes), flags, CAS.
-    let value_bytes: Vec<u8> = match &fields[1] {
-        RedisValue::BulkString(s) => s.as_bytes().to_vec(),
-        RedisValue::BulkRedisString(s) => s.as_slice().to_vec(),
-        RedisValue::SimpleString(s) => s.as_bytes().to_vec(),
-        RedisValue::SimpleStringStatic(s) => s.as_bytes().to_vec(),
-        other => {
-            eprintln!("[redcouch] GET value field unexpected type: {other:?}");
-            Vec::new()
-        }
-    };
+    // Value is hex-encoded by the Lua script to avoid redis-module
+    // UTF-8 conversion panics on binary payloads.  Decode it here.
+    let hex_str = eval_str(&fields[1]);
+    let value_bytes = hex_decode(&hex_str);
 
     let flags: u32 = eval_str(&fields[2]).parse().unwrap_or(0);
     let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
