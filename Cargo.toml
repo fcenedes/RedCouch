@@ -6,6 +6,7 @@ rust-version = "1.85"
 description = "Redis module bridging Couchbase memcached binary protocol clients to Redis 8+"
 license = "MIT"
 repository = "https://github.com/fcenedes/RedCouch"
+homepage = "https://github.com/fcenedes/RedCouch"
 readme = "README.md"
 keywords = ["redis", "memcached", "couchbase", "module", "protocol"]
 categories = ["database", "network-programming"]

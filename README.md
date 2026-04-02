@@ -65,7 +65,7 @@ Release artifacts are built for the following targets:
 | `x86_64-apple-darwin` | macOS | x86_64 | `libred_couch.dylib` |
 | `aarch64-apple-darwin` | macOS | ARM64 | `libred_couch.dylib` |
 
-**Windows** is not a supported runtime target. Redis modules require a POSIX-compatible environment; Windows is not supported by the Redis module API for production deployment.
+**Windows**: RedCouch does not currently support or publish Windows runtime artifacts.
 
 ## License
 

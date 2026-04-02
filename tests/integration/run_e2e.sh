@@ -11,7 +11,7 @@
 #
 # The script:
 #   1. Starts a private Redis instance with the module loaded
-#   2. Waits for the binary-protocol listener on port 11210
+#   2. Waits for the protocol listener on port 11210 (binary + ASCII)
 #   3. Runs the Python test suite
 #   4. Tears down the Redis instance
 # ──────────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ redis-server \
 REDIS_PID=$!
 
 # Wait for memcached listener to be ready
-echo "Waiting for binary-protocol listener on port $MEMCACHED_PORT..."
+echo "Waiting for protocol listener on port $MEMCACHED_PORT..."
 MAX_WAIT=10
 for i in $(seq 1 $MAX_WAIT); do
     if python3 -c "

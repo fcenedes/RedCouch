@@ -94,7 +94,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: [test]
+    needs: [build, test, publish-github]
     runs-on: ubuntu-latest
     if: ${{ vars.PUBLISH_CRATE == 'true' }}
     steps:
