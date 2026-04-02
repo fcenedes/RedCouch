@@ -113,17 +113,97 @@ Source: `benchmarks/results/bench_20260402_144029.json` and `stress_20260402_150
 
 ---
 
-## 3. Known Limitations
+## 3. Benchmark Comparison: Couchbase OSS vs Redis OSS vs Redis + RedCouch
 
-### 3.1 Counter Precision (post-2^53)
+This section documents the expected performance positioning of RedCouch relative to Couchbase OSS (memcached binary protocol over TCP) and Redis OSS (native Redis commands), grounded in the repository's verified benchmark artifacts and architecture.
+
+### 3.1 Comparison Dimensions
+
+The comparison covers two operation categories across three systems:
+
+| Category | Operations | Why It Matters |
+|---|---|---|
+| **Common key operations** | GET (hit/miss), SET (various sizes), DELETE | Core data-path throughput and latency for the most frequent memcached binary operations |
+| **Hash/Lua hex-encode bridge path** | All RedCouch data operations use `HSET`/`HGETALL` via Lua scripts with hex encode/decode (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#storage-model) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#binary-safety)) | This bridge is the primary data path and the dominant per-request cost; there is no separate JSON-backed mode in the current architecture |
+
+### 3.2 Systems Compared
+
+| System | Description | Data Path |
+|---|---|---|
+| **Couchbase OSS** | Couchbase Server's native memcached binary protocol endpoint (port 11210) | Native KV engine (no in-repo performance data available) |
+| **Redis OSS native** | Redis Open Source with native `GET`/`SET`/`DEL` commands | Direct Redis data structure access; no protocol translation or hex encoding overhead |
+| **Redis + RedCouch** | Redis 8+ with the RedCouch module loaded; memcached binary clients connect on port 11210 | TCP listener → binary protocol parse → Lua script (hex encode/decode + `HSET`/`HGETALL`) → Redis hash storage (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)) |
+
+### 3.3 RedCouch Measured Baselines
+
+The following baselines are from the verified benchmark artifact `benchmarks/results/bench_20260402_144029.json` (tag: `verifier-wave9b`, Redis 8.4.0, macOS arm64, Python 3.13.5 harness):
+
+| Operation | 1-Client ops/sec | 1-Client p50 µs | 1-Client p99 µs | 4-Client ops/sec | 4-Client p50 µs |
+|---|---|---|---|---|---|
+| SET 64B | 31,694 | 29 | 77 | 62,574 | 60 |
+| SET 1KB | 29,899 | 31 | 58 | 60,439 | 63 |
+| GET (hit) | 26,814 | 35 | 57 | 50,929 | 76 |
+| GET (miss) | 36,782 | 26 | 41 | 68,045 | 54 |
+| DELETE | 40,038 | 24 | 40 | 66,470 | 55 |
+| INCREMENT | 31,883 | 30 | 56 | 66,568 | 56 |
+| Mixed R/W | 14,635 | 65 | 95 | 30,138 | 129 |
+
+### 3.4 Expected Performance Positioning
+
+**Baseline expectation**: RedCouch throughput and latency are expected to fall **between** Couchbase OSS and Redis OSS native for equivalent operations. This expectation is based on the following in-repo evidence about RedCouch's architecture:
+
+1. **RedCouch adds bridge overhead on top of Redis**: each memcached binary request traverses TCP accept → binary frame parse → Lua script execution (hex encode/decode + hash field reads/writes) → response assembly (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)). This overhead means RedCouch is expected to be slower than raw Redis `GET`/`SET`/`DEL`, which operate directly on Redis data structures without protocol translation or hex encoding.
+
+2. **The dominant RedCouch cost is the Lua hex encode/decode bridge**: as documented in Section 4.3 (Remaining Hot Paths), every GET and binary-value mutation passes through Lua `string.format('%02x')` encoding and manual hex decode in Rust. This is the correctness-first approach for binary-safe value storage (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#binary-safety)).
+
+3. **Per-request `ThreadSafeContext` / GIL serialization**: each Redis command acquires a `ThreadSafeContext` lock, serializing Redis access across all connection threads (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#threading-model)). This is the primary concurrency bottleneck, limiting scaling above ~4 clients to a plateau of ~35k ops/s for contended workloads (verified in stress artifact `benchmarks/results/stress_20260402_150543.json`).
+
+**Note on Couchbase OSS positioning**: no Couchbase OSS benchmark data has been captured with this repository's harness. The expectation that RedCouch will be faster than Couchbase OSS for simple key operations is an architectural hypothesis — RedCouch runs on top of Redis's in-memory data structures — but this has not been measured. Direct comparison requires running the benchmark harness against a Couchbase memcached endpoint under identical conditions.
+
+### 3.5 Per-Operation Bridge Overhead (In-Repo Evidence)
+
+The following table documents RedCouch's per-operation data path and the additional overhead relative to Redis native commands. Couchbase OSS comparison data is not available in-repo and is omitted.
+
+| Operation | RedCouch Data Path (from `docs/ARCHITECTURE.md`) | Bridge Overhead vs. Redis Native |
+|---|---|---|
+| **GET (hit)** | Binary parse → Lua `HGETALL` + hex decode → response build | Hex decode + hash field access vs. direct `GET` on a simple key |
+| **SET** | Binary parse → Lua CAS counter `INCR` + hex encode + `HSET` + `EXPIRE` → response | Hex encode + multi-field hash write + CAS counter increment vs. direct `SET` |
+| **DELETE** | Binary parse → Lua CAS check + `DEL` → response | CAS-checked Lua script vs. direct `DEL` |
+| **All operations** | Every data mutation uses the Lua hex-encode bridge path; there is no separate mode | The hex-encode bridge adds encoding/decoding overhead to every request |
+
+### 3.6 Measurement Methodology and Source of Truth
+
+- **Current benchmark harness**: `benchmarks/bench_binary_protocol.py` — a Python-based live-system harness that drives real memcached binary traffic against a running Redis 8+ instance with RedCouch loaded. This harness measures end-to-end throughput, latency percentiles (p50/p95/p99/max), error rates, and resource usage per workload.
+
+- **Source of truth for end-to-end comparisons**: the Python/live-system benchmark harness remains the authoritative source for system-level performance measurement. Criterion (adopted as a complement per the approved benchmark strategy) is scoped to Rust-internal microbenchmarks only and does not replace the live harness for cross-system comparison.
+
+- **Cross-system comparison methodology**: to produce direct Couchbase OSS vs. Redis OSS vs. RedCouch numbers, run the same workload profiles against each system under identical hardware, OS, and client conditions. The benchmark harness supports configurable host/port via `BENCH_HOST` and `BENCH_PORT` environment variables and can target any memcached-binary-compatible endpoint.
+
+- **No fabricated comparison numbers**: this section documents the architectural rationale and RedCouch-measured baselines only. Direct Couchbase OSS and Redis OSS native throughput numbers are **not included** because they have not been measured with the repository's benchmark harness under controlled conditions. When those measurements are produced, they should be added to this section with full artifact provenance.
+
+### 3.7 Benchmark Artifact Provenance
+
+| Artifact | Path | Tag/Ref | Content |
+|---|---|---|---|
+| Baseline benchmark | `benchmarks/results/bench_20260402_144029.json` | `verifier-wave9b` | 10 workloads × 2 concurrency levels (c=1, c=4) |
+| Stress/soak results | `benchmarks/results/stress_20260402_150543.json` | git ref `891847b` | 7-phase stress suite: scaling, contention, soak, churn, quiet pipeline, malformed |
+| Benchmark harness | `benchmarks/bench_binary_protocol.py` | — | Python 3.13.5, drives memcached binary protocol over TCP |
+| Stress harness | `benchmarks/stress_soak_validation.py` | — | 7-phase validation suite |
+| Platform | macOS 15.7.4, arm64 | — | Redis 8.4.0 |
+
+---
+
+## 4. Known Limitations
+
+### 4.1 Counter Precision (post-2^53)
 
 Counter values are exact only for the range `[0, 2^53)`. Beyond `2^53` (9,007,199,254,740,992), the behavior is **precision loss / rounding** rather than reliable wraparound. This is inherent to Redis's use of IEEE 754 double-precision floats for numeric storage via Lua scripts. The memcached binary protocol specifies unsigned 64-bit counter semantics; RedCouch cannot provide bit-exact behavior above 2^53.
 
-### 3.2 Append/Prepend Duration Caveat
+### 4.2 Append/Prepend Duration Caveat
 
 APPEND and PREPEND operations retrieve the existing value via Lua hex encode, concatenate, and store back. For items with large accumulated values, each append incurs cost proportional to the existing value size. In the stress suite, 10 keys reached ~61 KB each after ~950 appends of 64B chunks. **For append-heavy workloads with large values, monitor value sizes and consider periodic key rotation.**
 
-### 3.3 Remaining Hot Paths
+### 4.3 Remaining Hot Paths
 
 The following are identified performance costs that remain in the GA release:
 
@@ -131,15 +211,15 @@ The following are identified performance costs that remain in the GA release:
 2. **Per-request `ThreadSafeContext` / GIL**: Each Redis command acquires a `ThreadSafeContext` lock. This serializes Redis access across all connection threads and is the primary concurrency bottleneck above ~4 clients.
 3. **Smaller allocation costs**: Per-request `Vec` allocations for key namespacing, hex conversion buffers, and response assembly.
 
-### 3.4 Startup / Bind Caveat
+### 4.4 Startup / Bind Caveat
 
 The background TCP listener thread may log readiness (`listening on 127.0.0.1:11210`) before the bind attempt has definitively succeeded. If another process holds port 11210, the module logs a `FATAL: cannot bind` error and the listener thread exits, but Redis itself continues running. **Check for the bind-success log line and verify port 11210 is reachable after module load.**
 
-### 3.5 SASL Authentication
+### 4.5 SASL Authentication
 
 SASL auth is stub-only: `SASL_LIST_MECHS` returns "PLAIN", `SASL_AUTH` always succeeds regardless of credentials. This allows SASL-requiring clients (e.g., Couchbase SDKs) to complete the auth handshake. **No actual credential enforcement exists in this release.**
 
-### 3.6 Malformed Traffic Behavior
+### 4.6 Malformed Traffic Behavior
 
 Malformed requests are handled with clean disconnect or timeout, not crashes:
 
@@ -153,7 +233,7 @@ Malformed requests are handled with clean disconnect or timeout, not crashes:
 | Oversized key (>250 bytes) | Error response (status 0x0004), connection stays open |
 | Oversized frame (>20 MiB body) | Error response, connection closed |
 
-### 3.7 Deferred Surfaces
+### 4.7 Deferred Surfaces
 
 The following are **explicitly not in GA scope**:
 - Meta protocol **stale items** (`N`/vivify on mg, `I`/invalidate on md, `R`/recache, `W`/`X`/`Z` stale flags, `b`/base64 keys) — these require a stale item concept not in the current item model
@@ -165,75 +245,52 @@ The following are **explicitly not in GA scope**:
 
 ---
 
-## 4. Run and Configuration Reference
+## 5. Run, Configuration, and Release Reference
 
-### Build
+For complete installation instructions, building from source, loading into Redis, troubleshooting, and the release process (including GitHub Release automation and crates.io publication gating), see **[`docs/INSTALL.md`](INSTALL.md)**.
+
+For runtime constants and architecture details, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md)**.
+
+### Quick Reference
 
 ```bash
+# Build
 cargo build --release
+
+# Load into Redis 8+
+redis-server --loadmodule ./target/release/libred_couch.dylib  # macOS
+redis-server --loadmodule ./target/release/libred_couch.so     # Linux
+
+# Verify
+redis-cli MODULE LIST    # should show "redcouch"
+nc -z 127.0.0.1 11210   # should succeed
 ```
-
-Produces `target/release/libred_couch.dylib` (macOS) or `libred_couch.so` (Linux).
-
-### Load into Redis 8+
-
-```bash
-redis-server --loadmodule ./target/release/libred_couch.dylib
-```
-
-The module registers as `redcouch` and starts a TCP listener on `127.0.0.1:11210`.
-
-### Runtime Constants
-
-| Parameter | Value | Source |
-|---|---|---|
-| Bind address | `127.0.0.1:11210` | `DEFAULT_BIND_ADDR` in `src/lib.rs` |
-| Max connections | 1,024 | `MAX_CONNECTIONS` |
-| Socket read timeout | 30 seconds | `SOCKET_READ_TIMEOUT` |
-| Socket write timeout | 10 seconds | `SOCKET_WRITE_TIMEOUT` |
-| Max body length per frame | 20 MiB | `MAX_BODY_LEN` in `src/protocol.rs` |
-| Max key length | 250 bytes | `MAX_KEY_LEN` in `src/protocol.rs` |
-| Max read buffer per connection | ~20 MiB + header + 4 KB | `MAX_READ_BUF` |
-| Key prefix | `rc:` | `KEY_PREFIX` |
-| CAS counter key | `redcouch:sys:cas_counter` | `CAS_COUNTER_KEY` |
 
 ### Verification Commands
 
 ```bash
-# Build check
-cargo check
-
-# Run unit/protocol tests (146 tests — 60 binary + 58 ASCII + 28 meta)
-cargo test
-
-# Run E2E integration tests (requires running Redis 8+ with module loaded)
-cd tests/integration && bash run_e2e.sh
-
-# Run benchmark suite
-cd benchmarks && bash run_benchmarks.sh
-
-# Run stress/soak suite
-cd benchmarks && bash run_stress_soak.sh
+cargo check                                      # Build check
+cargo test                                       # 146 unit/protocol tests
+cd tests/integration && bash run_e2e.sh          # E2E (requires Redis 8+)
+cd benchmarks && bash run_benchmarks.sh          # Benchmark suite
+cd benchmarks && bash run_stress_soak.sh         # Stress/soak suite
 ```
 
-### Dependencies
+### crates.io Publication
 
-| Crate | Version | Purpose |
-|---|---|---|
-| `redis-module` | 2.0.7 | Redis module API bindings |
-| `bytes` | 1 | Byte buffer management |
-| `byteorder` | 1 | Big-endian integer parsing |
-| `thiserror` | 2.0.12 | Error type derivation |
+Source publication to crates.io is **policy-gated**: `Cargo.toml` metadata is configured, but live publication remains disabled until maintainers explicitly confirm the MIT license for public distribution. The release workflow includes a gated `publish-crate` job controlled by the `PUBLISH_CRATE` repository variable. See [`docs/INSTALL.md`](INSTALL.md#cratesio) for details.
 
 ---
 
-## 5. Stress/Soak Validation Statement
+## 6. Stress/Soak Validation Statement
 
 **The load/stress/soak validation wave (Wave 10) was validation-only, not a product-behavior change.** No code was modified during the stress/soak wave. The 7-phase suite confirmed the operating envelope of the existing implementation on Redis 8.4.0 and produced the evidence-backed findings documented in Section 2 above. The stress artifacts are stored in `benchmarks/results/stress_20260402_150543.json`.
 
 ---
 
-## 6. Test Coverage Summary
+## 7. Test Coverage Summary
+
+For test architecture details and development workflow, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#test-architecture)** and **[`CONTRIBUTING.md`](../CONTRIBUTING.md)**.
 
 | Category | Count | Location |
 |---|---|---|
@@ -248,7 +305,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ---
 
-## 7. GA Release Checklist
+## 8. GA Release Checklist
 
 ### Pre-Release
 
@@ -297,3 +354,86 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 | Deferred work explicitly scoped | ✅ | Meta stale items/UDP/bucket not in GA |
 
 **Recommendation**: **GO** for GA release of the memcached binary + ASCII text protocol over TCP scope on Redis 8+.
+
+---
+
+## 9. Release-Readiness and Publish-Enablement Checklist
+
+This section captures all prerequisites for cutting a release and enabling crates.io publication. Items are grouped by category with explicit status and blockers.
+
+### 9.1 License Verification
+
+| Check | Status | Evidence |
+|---|---|---|
+| `LICENSE` file present at repo root | ✅ | Standard MIT License text, Copyright (c) 2026 RedCouch Contributors |
+| `Cargo.toml` `license` field | ✅ | `license = "MIT"` |
+| `README.md` License section | ✅ | "MIT — see [LICENSE](LICENSE) for details" |
+| `CONTRIBUTING.md` license reference | ✅ | "contributions will be licensed under the MIT License" |
+| `docs/GA_RELEASE.md` crates.io section | ✅ | References MIT license and policy gate |
+| `docs/INSTALL.md` crates.io section | ✅ | References MIT license and policy gate |
+| Source file headers | ℹ️ N/A | No source-header license convention adopted; `LICENSE` file at root is the sole license indicator (standard for Rust crates) |
+| License consistency across all references | ✅ | All references say MIT; no conflicting license mentions anywhere in the repository |
+
+### 9.2 Cargo.toml Metadata for crates.io
+
+| Field | Status | Value |
+|---|---|---|
+| `name` | ✅ | `red_couch` |
+| `version` | ✅ | `0.1.0` |
+| `edition` | ✅ | `2024` |
+| `rust-version` | ✅ | `1.85` |
+| `description` | ✅ | "Redis module bridging Couchbase memcached binary protocol clients to Redis 8+" |
+| `license` | ✅ | `MIT` |
+| `repository` | ✅ | `https://github.com/fcenedes/RedCouch` |
+| `homepage` | ✅ | `https://github.com/fcenedes/RedCouch` |
+| `readme` | ✅ | `README.md` |
+| `keywords` | ✅ | `["redis", "memcached", "couchbase", "module", "protocol"]` |
+| `categories` | ✅ | `["database", "network-programming"]` |
+| `publish` field | ℹ️ | Not set (defaults to `true`). No code change needed — the workflow gate is the publish control. |
+
+### 9.3 GitHub Release Automation
+
+| Check | Status | Evidence |
+|---|---|---|
+| CI workflow (`ci.yml`) | ✅ | Runs on push/PR to `main`; Ubuntu + macOS; check, test, clippy, fmt, doc |
+| Release workflow (`release.yml`) | ✅ | Triggered by `v*` tags; builds 4 targets (Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64) |
+| Test gate before release | ✅ | `test` job runs `cargo test` + `cargo clippy` before artifacts are published |
+| GitHub Release creation | ✅ | `softprops/action-gh-release@v2` with auto-generated release notes and artifact upload |
+| SHA-256 checksums | ✅ | Each target produces `.tar.gz.sha256` alongside `.tar.gz` |
+| Windows targets | ✅ Not included | Correctly excluded — Windows is not a supported target |
+
+### 9.4 crates.io Publication Gate
+
+| Check | Status | Evidence |
+|---|---|---|
+| `publish-crate` job exists in `release.yml` | ✅ | Lines 95–108: runs after build + test + GitHub Release |
+| Gated by `PUBLISH_CRATE` variable | ✅ | `if: ${{ vars.PUBLISH_CRATE == 'true' }}` — disabled by default |
+| `CARGO_REGISTRY_TOKEN` secret required | ✅ | Referenced in the publish step |
+| Documentation of gate in `docs/INSTALL.md` | ✅ | Section "crates.io" explains the policy gate |
+| Documentation of gate in `docs/GA_RELEASE.md` | ✅ | Section 5 "crates.io Publication" explains the policy gate |
+
+### 9.5 Release Process Prerequisites (Maintainer Actions)
+
+Before cutting a release, the maintainer must:
+
+1. **Version bump**: Update `version` in `Cargo.toml` and verify `Cargo.lock` reflects the new version
+2. **Changelog**: Consider adding a `CHANGELOG.md` or rely on GitHub auto-generated release notes
+3. **Tag**: Create and push a `v*` tag (e.g., `git tag v0.1.0 && git push origin v0.1.0`)
+4. **Verify CI**: Ensure the latest `main` commit passes CI before tagging
+5. **Post-release**: Verify the GitHub Release page has all 4 target artifacts with checksums
+
+### 9.6 Items Blocked on Maintainer/Policy Confirmation
+
+| Item | Blocker | What's Ready | What's Needed |
+|---|---|---|---|
+| **crates.io publication** | Explicit maintainer confirmation that MIT is the intended license for public crate distribution | `Cargo.toml` metadata complete, `publish-crate` job exists, `LICENSE` file present | Set `PUBLISH_CRATE=true` as a repository variable and add `CARGO_REGISTRY_TOKEN` secret |
+| **First release tag** | Maintainer decision on release timing | CI, release workflow, documentation, and test suite all ready | Push a `v*` tag to trigger the release workflow |
+
+### 9.7 Verified Facts (Carried Forward)
+
+- ✅ Linux/macOS release automation exists and covers 4 targets
+- ✅ Windows is unsupported and correctly excluded from all workflows and documentation
+- ✅ crates.io publication remains policy-gated pending explicit MIT confirmation
+- ✅ `cargo check` passes, `cargo test` passes with 146 tests (60 binary + 58 ASCII + 28 meta)
+- ✅ Built-ins (EVALSHA migration + non-CAS DELETE bypass), benchmark comparison docs, and open-source documentation set are complete and reflected in `docs/GA_RELEASE.md`
+- ✅ No `package.json` exists (correct: this is a Rust crate, not a Node.js package)

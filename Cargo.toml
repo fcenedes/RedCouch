@@ -19,3 +19,4 @@ redis-module = {version = "2.0.7"}
 bytes        = "1"          # convenient byte buffer
 byteorder    = "1"          # read big-endian ints
 thiserror    = "2.0.12"          # nicer error enum
+sha1 = "0.11.0"
