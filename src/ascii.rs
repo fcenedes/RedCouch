@@ -281,14 +281,21 @@ fn parse_command_line(line: &[u8]) -> CmdParseResult<'_> {
 
 // ── Hex encoding helper ─────────────────────────────────────────────
 
-/// Hex digit lookup table — avoids per-byte `fmt::Write` dispatch.
+/// Hex digit lookup table for `hex_encode`.
+///
+/// NOTE: `hex_encode` is currently unused — the Lua scripts handle
+/// hex encoding server-side.  Kept as a utility for potential future
+/// callers.  Not on any runtime hot path today.
 #[cfg(not(test))]
 const HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
 
-/// Encode raw bytes as lowercase hex pairs (for Lua script value arg).
+/// Encode raw bytes as lowercase hex pairs.
 ///
-/// Uses direct table lookup instead of `fmt::Write` per byte for
-/// better throughput on the hot SET/meta-set encode path.
+/// Uses direct table lookup instead of `fmt::Write` per byte.
+///
+/// NOTE: This helper is currently unused at runtime — Lua scripts
+/// perform hex encoding inside Redis.  It is retained as a utility
+/// for potential future callers and is **not** on a hot path today.
 #[cfg(not(test))]
 fn hex_encode(data: &[u8]) -> String {
     let mut s = String::with_capacity(data.len() * 2);
