@@ -281,13 +281,20 @@ fn parse_command_line(line: &[u8]) -> CmdParseResult<'_> {
 
 // ── Hex encoding helper ─────────────────────────────────────────────
 
+/// Hex digit lookup table — avoids per-byte `fmt::Write` dispatch.
+#[cfg(not(test))]
+const HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
+
 /// Encode raw bytes as lowercase hex pairs (for Lua script value arg).
+///
+/// Uses direct table lookup instead of `fmt::Write` per byte for
+/// better throughput on the hot SET/meta-set encode path.
 #[cfg(not(test))]
 fn hex_encode(data: &[u8]) -> String {
     let mut s = String::with_capacity(data.len() * 2);
     for &b in data {
-        use std::fmt::Write;
-        let _ = write!(s, "{:02x}", b);
+        s.push(HEX_CHARS[(b >> 4) as usize] as char);
+        s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
     }
     s
 }

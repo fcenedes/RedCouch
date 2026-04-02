@@ -113,8 +113,31 @@ pub(crate) fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
     rk
 }
 
+/// Lookup table for hex digit → nibble value (0xFF = invalid).
+/// Using a static LUT eliminates per-nibble match branching on the
+/// hot GET/GAT decode path.
+#[cfg(not(test))]
+static HEX_DECODE_LUT: [u8; 256] = {
+    let mut t = [0xFF_u8; 256];
+    t[b'0' as usize] = 0;  t[b'1' as usize] = 1;
+    t[b'2' as usize] = 2;  t[b'3' as usize] = 3;
+    t[b'4' as usize] = 4;  t[b'5' as usize] = 5;
+    t[b'6' as usize] = 6;  t[b'7' as usize] = 7;
+    t[b'8' as usize] = 8;  t[b'9' as usize] = 9;
+    t[b'a' as usize] = 10; t[b'b' as usize] = 11;
+    t[b'c' as usize] = 12; t[b'd' as usize] = 13;
+    t[b'e' as usize] = 14; t[b'f' as usize] = 15;
+    t[b'A' as usize] = 10; t[b'B' as usize] = 11;
+    t[b'C' as usize] = 12; t[b'D' as usize] = 13;
+    t[b'E' as usize] = 14; t[b'F' as usize] = 15;
+    t
+};
+
 /// Decode a hex string (pairs of hex digits) into raw bytes.
 /// Returns an empty Vec if the input is not valid hex.
+///
+/// Uses a static 256-byte lookup table instead of per-nibble match
+/// chains for better throughput on the hot GET/GAT response path.
 #[cfg(not(test))]
 pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
     if hex.len() % 2 != 0 {
@@ -122,20 +145,15 @@ pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
     }
     let mut out = Vec::with_capacity(hex.len() / 2);
     let bytes = hex.as_bytes();
-    for i in (0..bytes.len()).step_by(2) {
-        let hi = match bytes[i] {
-            b'0'..=b'9' => bytes[i] - b'0',
-            b'a'..=b'f' => bytes[i] - b'a' + 10,
-            b'A'..=b'F' => bytes[i] - b'A' + 10,
-            _ => return Vec::new(),
-        };
-        let lo = match bytes[i + 1] {
-            b'0'..=b'9' => bytes[i + 1] - b'0',
-            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
-            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
-            _ => return Vec::new(),
-        };
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = HEX_DECODE_LUT[bytes[i] as usize];
+        let lo = HEX_DECODE_LUT[bytes[i + 1] as usize];
+        if hi > 0x0F || lo > 0x0F {
+            return Vec::new();
+        }
         out.push((hi << 4) | lo);
+        i += 2;
     }
     out
 }
@@ -187,6 +205,9 @@ return {0, tostring(new_cas)}
 /// Returns: {status, hex_value, flags_string, cas_string}
 ///   status: 0=OK, -1=NOT_FOUND
 ///   hex_value: value bytes encoded as lowercase hex pairs
+///
+/// Performance: uses a pre-built 256-entry lookup table and
+/// table.concat instead of gsub + string.format per byte.
 #[cfg(not(test))]
 pub(crate) const LUA_GET: &str = r#"
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', ''} end
@@ -196,8 +217,11 @@ local c = redis.call('HGET', KEYS[1], 'c')
 if v == false then v = '' end
 if f == false then f = '0' end
 if c == false then c = '0' end
-local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
-return {0, hex, f, c}
+local ht = {}
+for i = 0, 255 do ht[i] = string.format('%02x', i) end
+local p = {}
+for i = 1, #v do p[i] = ht[string.byte(v, i)] end
+return {0, table.concat(p), f, c}
 "#;
 
 /// Lua script for meta GET — like LUA_GET but also returns TTL and value size.
@@ -218,8 +242,11 @@ if v == false then v = '' end
 if f == false then f = '0' end
 if c == false then c = '0' end
 local ttl = redis.call('TTL', KEYS[1])
-local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
-return {0, hex, f, c, ttl, #v}
+local ht = {}
+for i = 0, 255 do ht[i] = string.format('%02x', i) end
+local p = {}
+for i = 1, #v do p[i] = ht[string.byte(v, i)] end
+return {0, table.concat(p), f, c, ttl, #v}
 "#;
 
 /// Lua script for DELETE with CAS check.
@@ -334,8 +361,11 @@ local v = redis.call('HGET', KEYS[1], 'v')
 local f = redis.call('HGET', KEYS[1], 'f')
 if v == false then v = '' end
 if f == false then f = '0' end
-local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
-return {0, hex, f, tostring(new_cas)}
+local ht = {}
+for i = 0, 255 do ht[i] = string.format('%02x', i) end
+local p = {}
+for i = 1, #v do p[i] = ht[string.byte(v, i)] end
+return {0, table.concat(p), f, tostring(new_cas)}
 "#;
 
 /// Lua script for APPEND — append data to existing value.
