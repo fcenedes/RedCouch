@@ -113,17 +113,95 @@ Source: `benchmarks/results/bench_20260402_144029.json` and `stress_20260402_150
 
 ---
 
-## 3. Known Limitations
+## 3. Benchmark Comparison: Couchbase OSS vs Redis OSS vs Redis + RedCouch
 
-### 3.1 Counter Precision (post-2^53)
+This section documents the expected performance positioning of RedCouch relative to Couchbase OSS (memcached binary protocol over TCP) and Redis OSS (native Redis commands), grounded in the repository's verified benchmark artifacts and architecture.
+
+### 3.1 Comparison Dimensions
+
+The comparison covers two operation categories across three systems:
+
+| Category | Operations | Why It Matters |
+|---|---|---|
+| **Common key operations** | GET (hit/miss), SET (various sizes), DELETE | Core data-path throughput and latency for the most frequent memcached binary operations |
+| **JSON bridge path** | JSON.SET / JSON.GET (via RedCouch's Lua hex-encode bridge) | RedCouch translates memcached binary requests into Redis hash operations with Lua-based hex encoding; this is the primary data path and the dominant per-request cost |
+
+### 3.2 Systems Compared
+
+| System | Description | Data Path |
+|---|---|---|
+| **Couchbase OSS** | Couchbase Server's native memcached binary protocol endpoint (port 11210) | Direct KV engine access; items stored natively in Couchbase's storage layer |
+| **Redis OSS native** | Redis Open Source with native `GET`/`SET`/`DEL` commands | Direct Redis data structure access; single-threaded event loop, no bridge overhead |
+| **Redis + RedCouch** | Redis 8+ with the RedCouch module loaded; memcached binary clients connect on port 11210 | TCP listener → binary protocol parse → Lua script (hex encode/decode + hash operations) → Redis hash storage |
+
+### 3.3 RedCouch Measured Baselines
+
+The following baselines are from the verified benchmark artifact `benchmarks/results/bench_20260402_144029.json` (tag: `verifier-wave9b`, Redis 8.4.0, macOS arm64, Python 3.13.5 harness):
+
+| Operation | 1-Client ops/sec | 1-Client p50 µs | 1-Client p99 µs | 4-Client ops/sec | 4-Client p50 µs |
+|---|---|---|---|---|---|
+| SET 64B | 31,694 | 29 | 77 | 62,574 | 60 |
+| SET 1KB | 29,899 | 31 | 58 | 60,439 | 63 |
+| GET (hit) | 26,814 | 35 | 57 | 50,929 | 76 |
+| GET (miss) | 36,782 | 26 | 41 | 68,045 | 54 |
+| DELETE | 40,038 | 24 | 40 | 66,470 | 55 |
+| INCREMENT | 31,883 | 30 | 56 | 66,568 | 56 |
+| Mixed R/W | 14,635 | 65 | 95 | 30,138 | 129 |
+
+### 3.4 Expected Performance Positioning
+
+**Baseline expectation**: RedCouch throughput and latency are expected to fall **between** Couchbase OSS and Redis OSS native for equivalent operations, because:
+
+1. **RedCouch adds bridge overhead on top of Redis**: each memcached binary request traverses TCP accept → binary frame parse → Lua script execution (hex encode/decode + hash field reads/writes) → response assembly. This overhead means RedCouch cannot match raw Redis `GET`/`SET`/`DEL` throughput, which operates directly on Redis data structures without protocol translation or hex encoding.
+
+2. **Redis's in-memory data path is faster than Couchbase's disk-backed KV engine for simple key operations**: Redis OSS native commands operate on in-memory hash tables with single-digit-microsecond latencies. Couchbase OSS serves the memcached binary protocol through its storage engine, which includes persistence, replication, and bucket management overhead absent in Redis's pure-memory model.
+
+3. **The dominant RedCouch cost is the Lua hex encode/decode bridge**: as documented in Section 4.3 (Remaining Hot Paths), every GET and binary-value mutation passes through Lua `string.format('%02x')` encoding and manual hex decode in Rust. This is the correctness-first approach for binary-safe value storage but adds measurable per-request cost relative to both Redis native (no encoding needed) and Couchbase (native binary storage).
+
+4. **Per-request `ThreadSafeContext` / GIL serialization**: each Redis command acquires a `ThreadSafeContext` lock, serializing Redis access across all connection threads. This is the primary concurrency bottleneck, limiting scaling above ~4 clients to a plateau of ~35k ops/s for contended workloads (verified in stress artifact `benchmarks/results/stress_20260402_150543.json`).
+
+### 3.5 Comparison Rationale by Operation
+
+| Operation | RedCouch Path | Why Slower Than Redis Native | Why Faster Than Couchbase OSS |
+|---|---|---|---|
+| **GET (hit)** | Binary parse → Lua HGETALL + hex decode → response build | Hex decode + hash field access vs. direct `GET` | In-memory hash vs. Couchbase storage engine I/O |
+| **SET** | Binary parse → Lua CAS increment + hex encode + HSET + EXPIRE → response | Hex encode + multi-field hash write + CAS counter vs. direct `SET` | In-memory write vs. Couchbase persistence + replication |
+| **DELETE** | Binary parse → Lua CAS check + DEL → response | CAS-checked Lua script vs. direct `DEL` | In-memory delete vs. Couchbase tombstone + compaction |
+| **JSON bridge (implicit)** | All RedCouch data mutations use the Lua hex-encode bridge path; there is no separate "JSON mode" in the current architecture | The hex-encode bridge **is** the data path — it adds encoding overhead to every operation | Encoding cost is constant and small relative to Couchbase disk I/O |
+
+### 3.6 Measurement Methodology and Source of Truth
+
+- **Current benchmark harness**: `benchmarks/bench_binary_protocol.py` — a Python-based live-system harness that drives real memcached binary traffic against a running Redis 8+ instance with RedCouch loaded. This harness measures end-to-end throughput, latency percentiles (p50/p95/p99/max), error rates, and resource usage per workload.
+
+- **Source of truth for end-to-end comparisons**: the Python/live-system benchmark harness remains the authoritative source for system-level performance measurement. Criterion (adopted as a complement per the approved benchmark strategy) is scoped to Rust-internal microbenchmarks only and does not replace the live harness for cross-system comparison.
+
+- **Cross-system comparison methodology**: to produce direct Couchbase OSS vs. Redis OSS vs. RedCouch numbers, run the same workload profiles against each system under identical hardware, OS, and client conditions. The benchmark harness supports configurable host/port via `BENCH_HOST` and `BENCH_PORT` environment variables and can target any memcached-binary-compatible endpoint.
+
+- **No fabricated comparison numbers**: this section documents the architectural rationale and RedCouch-measured baselines only. Direct Couchbase OSS and Redis OSS native throughput numbers are **not included** because they have not been measured with the repository's benchmark harness under controlled conditions. When those measurements are produced, they should be added to this section with full artifact provenance.
+
+### 3.7 Benchmark Artifact Provenance
+
+| Artifact | Path | Tag/Ref | Content |
+|---|---|---|---|
+| Baseline benchmark | `benchmarks/results/bench_20260402_144029.json` | `verifier-wave9b` | 10 workloads × 2 concurrency levels (c=1, c=4) |
+| Stress/soak results | `benchmarks/results/stress_20260402_150543.json` | git ref `891847b` | 7-phase stress suite: scaling, contention, soak, churn, quiet pipeline, malformed |
+| Benchmark harness | `benchmarks/bench_binary_protocol.py` | — | Python 3.13.5, drives memcached binary protocol over TCP |
+| Stress harness | `benchmarks/stress_soak_validation.py` | — | 7-phase validation suite |
+| Platform | macOS 15.7.4, arm64 | — | Redis 8.4.0 |
+
+---
+
+## 4. Known Limitations
+
+### 4.1 Counter Precision (post-2^53)
 
 Counter values are exact only for the range `[0, 2^53)`. Beyond `2^53` (9,007,199,254,740,992), the behavior is **precision loss / rounding** rather than reliable wraparound. This is inherent to Redis's use of IEEE 754 double-precision floats for numeric storage via Lua scripts. The memcached binary protocol specifies unsigned 64-bit counter semantics; RedCouch cannot provide bit-exact behavior above 2^53.
 
-### 3.2 Append/Prepend Duration Caveat
+### 4.2 Append/Prepend Duration Caveat
 
 APPEND and PREPEND operations retrieve the existing value via Lua hex encode, concatenate, and store back. For items with large accumulated values, each append incurs cost proportional to the existing value size. In the stress suite, 10 keys reached ~61 KB each after ~950 appends of 64B chunks. **For append-heavy workloads with large values, monitor value sizes and consider periodic key rotation.**
 
-### 3.3 Remaining Hot Paths
+### 4.3 Remaining Hot Paths
 
 The following are identified performance costs that remain in the GA release:
 
@@ -131,15 +209,15 @@ The following are identified performance costs that remain in the GA release:
 2. **Per-request `ThreadSafeContext` / GIL**: Each Redis command acquires a `ThreadSafeContext` lock. This serializes Redis access across all connection threads and is the primary concurrency bottleneck above ~4 clients.
 3. **Smaller allocation costs**: Per-request `Vec` allocations for key namespacing, hex conversion buffers, and response assembly.
 
-### 3.4 Startup / Bind Caveat
+### 4.4 Startup / Bind Caveat
 
 The background TCP listener thread may log readiness (`listening on 127.0.0.1:11210`) before the bind attempt has definitively succeeded. If another process holds port 11210, the module logs a `FATAL: cannot bind` error and the listener thread exits, but Redis itself continues running. **Check for the bind-success log line and verify port 11210 is reachable after module load.**
 
-### 3.5 SASL Authentication
+### 4.5 SASL Authentication
 
 SASL auth is stub-only: `SASL_LIST_MECHS` returns "PLAIN", `SASL_AUTH` always succeeds regardless of credentials. This allows SASL-requiring clients (e.g., Couchbase SDKs) to complete the auth handshake. **No actual credential enforcement exists in this release.**
 
-### 3.6 Malformed Traffic Behavior
+### 4.6 Malformed Traffic Behavior
 
 Malformed requests are handled with clean disconnect or timeout, not crashes:
 
@@ -153,7 +231,7 @@ Malformed requests are handled with clean disconnect or timeout, not crashes:
 | Oversized key (>250 bytes) | Error response (status 0x0004), connection stays open |
 | Oversized frame (>20 MiB body) | Error response, connection closed |
 
-### 3.7 Deferred Surfaces
+### 4.7 Deferred Surfaces
 
 The following are **explicitly not in GA scope**:
 - Meta protocol **stale items** (`N`/vivify on mg, `I`/invalidate on md, `R`/recache, `W`/`X`/`Z` stale flags, `b`/base64 keys) — these require a stale item concept not in the current item model
@@ -165,7 +243,7 @@ The following are **explicitly not in GA scope**:
 
 ---
 
-## 4. Run, Configuration, and Release Reference
+## 5. Run, Configuration, and Release Reference
 
 For complete installation instructions, building from source, loading into Redis, troubleshooting, and the release process (including GitHub Release automation and crates.io publication gating), see **[`docs/INSTALL.md`](INSTALL.md)**.
 
@@ -202,13 +280,13 @@ Source publication to crates.io is **policy-gated**: `Cargo.toml` metadata is co
 
 ---
 
-## 5. Stress/Soak Validation Statement
+## 6. Stress/Soak Validation Statement
 
 **The load/stress/soak validation wave (Wave 10) was validation-only, not a product-behavior change.** No code was modified during the stress/soak wave. The 7-phase suite confirmed the operating envelope of the existing implementation on Redis 8.4.0 and produced the evidence-backed findings documented in Section 2 above. The stress artifacts are stored in `benchmarks/results/stress_20260402_150543.json`.
 
 ---
 
-## 6. Test Coverage Summary
+## 7. Test Coverage Summary
 
 For test architecture details and development workflow, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#test-architecture)** and **[`CONTRIBUTING.md`](../CONTRIBUTING.md)**.
 
@@ -225,7 +303,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ---
 
-## 7. GA Release Checklist
+## 8. GA Release Checklist
 
 ### Pre-Release
 
