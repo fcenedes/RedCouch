@@ -165,65 +165,40 @@ The following are **explicitly not in GA scope**:
 
 ---
 
-## 4. Run and Configuration Reference
+## 4. Run, Configuration, and Release Reference
 
-### Build
+For complete installation instructions, building from source, loading into Redis, troubleshooting, and the release process (including GitHub Release automation and crates.io publication gating), see **[`docs/INSTALL.md`](INSTALL.md)**.
+
+For runtime constants and architecture details, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md)**.
+
+### Quick Reference
 
 ```bash
+# Build
 cargo build --release
+
+# Load into Redis 8+
+redis-server --loadmodule ./target/release/libred_couch.dylib  # macOS
+redis-server --loadmodule ./target/release/libred_couch.so     # Linux
+
+# Verify
+redis-cli MODULE LIST    # should show "redcouch"
+nc -z 127.0.0.1 11210   # should succeed
 ```
-
-Produces `target/release/libred_couch.dylib` (macOS) or `libred_couch.so` (Linux).
-
-### Load into Redis 8+
-
-```bash
-redis-server --loadmodule ./target/release/libred_couch.dylib
-```
-
-The module registers as `redcouch` and starts a TCP listener on `127.0.0.1:11210`.
-
-### Runtime Constants
-
-| Parameter | Value | Source |
-|---|---|---|
-| Bind address | `127.0.0.1:11210` | `DEFAULT_BIND_ADDR` in `src/lib.rs` |
-| Max connections | 1,024 | `MAX_CONNECTIONS` |
-| Socket read timeout | 30 seconds | `SOCKET_READ_TIMEOUT` |
-| Socket write timeout | 10 seconds | `SOCKET_WRITE_TIMEOUT` |
-| Max body length per frame | 20 MiB | `MAX_BODY_LEN` in `src/protocol.rs` |
-| Max key length | 250 bytes | `MAX_KEY_LEN` in `src/protocol.rs` |
-| Max read buffer per connection | ~20 MiB + header + 4 KB | `MAX_READ_BUF` |
-| Key prefix | `rc:` | `KEY_PREFIX` |
-| CAS counter key | `redcouch:sys:cas_counter` | `CAS_COUNTER_KEY` |
 
 ### Verification Commands
 
 ```bash
-# Build check
-cargo check
-
-# Run unit/protocol tests (146 tests — 60 binary + 58 ASCII + 28 meta)
-cargo test
-
-# Run E2E integration tests (requires running Redis 8+ with module loaded)
-cd tests/integration && bash run_e2e.sh
-
-# Run benchmark suite
-cd benchmarks && bash run_benchmarks.sh
-
-# Run stress/soak suite
-cd benchmarks && bash run_stress_soak.sh
+cargo check                                      # Build check
+cargo test                                       # 146 unit/protocol tests
+cd tests/integration && bash run_e2e.sh          # E2E (requires Redis 8+)
+cd benchmarks && bash run_benchmarks.sh          # Benchmark suite
+cd benchmarks && bash run_stress_soak.sh         # Stress/soak suite
 ```
 
-### Dependencies
+### crates.io Publication
 
-| Crate | Version | Purpose |
-|---|---|---|
-| `redis-module` | 2.0.7 | Redis module API bindings |
-| `bytes` | 1 | Byte buffer management |
-| `byteorder` | 1 | Big-endian integer parsing |
-| `thiserror` | 2.0.12 | Error type derivation |
+Source publication to crates.io is **policy-gated**: `Cargo.toml` metadata is configured, but live publication remains disabled until maintainers explicitly confirm the MIT license for public distribution. The release workflow includes a gated `publish-crate` job controlled by the `PUBLISH_CRATE` repository variable. See [`docs/INSTALL.md`](INSTALL.md#cratesio) for details.
 
 ---
 
@@ -234,6 +209,8 @@ cd benchmarks && bash run_stress_soak.sh
 ---
 
 ## 6. Test Coverage Summary
+
+For test architecture details and development workflow, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#test-architecture)** and **[`CONTRIBUTING.md`](../CONTRIBUTING.md)**.
 
 | Category | Count | Location |
 |---|---|---|
