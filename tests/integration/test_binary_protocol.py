@@ -2,8 +2,12 @@
 """
 End-to-end integration tests for the RedCouch memcached binary protocol bridge.
 Requires: Redis 8+ with redcouch module loaded, listener on port 11210.
+
+Environment variables:
+  REDCOUCH_JSON_AVAILABLE  - "1" if JSON commands work, "0" if not (set by run_e2e.sh)
+  REDIS_PORT               - Redis port for direct verification (default 16379)
 """
-import socket, struct, sys, time
+import os, socket, struct, subprocess, sys, time
 
 MAGIC_REQ, MAGIC_RES, HDR = 0x80, 0x81, 24
 OP_GET, OP_SET, OP_ADD, OP_DELETE = 0x00, 0x01, 0x02, 0x04
@@ -12,6 +16,8 @@ OP_SETQ, OP_ADDQ, OP_DELETEQ = 0x11, 0x12, 0x14
 ST_OK, ST_NF, ST_IX, ST_ARGS, ST_UNK = 0, 1, 2, 4, 0x81
 CAS_ZERO, CAS_PH = 0, 1
 HOST, PORT, TMO = "127.0.0.1", 11210, 3.0
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "16379"))
+JSON_AVAILABLE = os.environ.get("REDCOUCH_JSON_AVAILABLE", "0") == "1"
 results = []
 known_gaps = []
 
@@ -68,6 +74,68 @@ def set_extras(flags=0, expiry=0):
 _TS = str(int(time.time()))
 def tkey(name):
     return f"t:{_TS}:{name}".encode()
+
+def redis_cli(*args):
+    """Run a redis-cli command against the test Redis instance."""
+    try:
+        r = subprocess.run(
+            ["redis-cli", "-p", str(REDIS_PORT)] + list(args),
+            capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+# ═════════════════════════════════════════════════════════════════
+# 0. JSON dependency preflight
+# ═════════════════════════════════════════════════════════════════
+def test_json_dependency():
+    """Verify whether JSON commands are available in the Redis instance.
+    The module's data path (SET/GET/ADD/REPLACE/DELETE/INCR/DECR) all
+    depend on JSON.SET / JSON.GET / JSON.NUMINCRBY."""
+    result = redis_cli("JSON.SET", "_e2e_probe", "$", '"probe"')
+    if "OK" in result:
+        redis_cli("DEL", "_e2e_probe")
+        chk("json_commands_available", True)
+    else:
+        chk("json_commands_available", False,
+            f"JSON.SET returned: {result!r}. "
+            "Module data path requires RedisJSON. "
+            "All data-path tests will show module behavior WITHOUT "
+            "a working backing store.")
+
+
+# ═════════════════════════════════════════════════════════════════
+# 0b. SET actually creates a key (verifies backing store)
+# ═════════════════════════════════════════════════════════════════
+def test_set_creates_key():
+    """After binary SET, verify the key actually exists in Redis."""
+    s = conn()
+    k = tkey("verify")
+    s.sendall(build_req(OP_SET, opaque=50, extras=set_extras(),
+                        key=k, value=b'"verify_val"'))
+    d = recv_min(s, HDR)
+    s.close()
+    r, _ = parse_resp(d)
+
+    # Module returns ST_OK regardless — check what Redis actually has
+    key_str = k.decode()
+    exists = redis_cli("EXISTS", key_str)
+    key_type = redis_cli("TYPE", key_str)
+
+    if r and r["status"] == ST_OK:
+        if exists == "1":
+            chk("set_creates_key_in_redis", True)
+            chk("set_key_type", key_type == "ReJSON-RL",
+                f"expected ReJSON-RL, got {key_type!r}")
+        else:
+            chk("set_creates_key_in_redis", False,
+                f"SET returned ST_OK but key does not exist in Redis "
+                f"(EXISTS={exists}, TYPE={key_type}). "
+                "Module reports success without a working backing store.")
+    else:
+        chk("set_creates_key_in_redis", False,
+            f"SET did not return ST_OK: {r}")
 
 
 # ── 1. NOOP baseline ────────────────────────────────────────────
@@ -192,8 +260,8 @@ def test_quiet_addq_error_preserved():
     elif r1 and r1["opaque"] == 412:
         # ADDQ succeeded (didn't detect existing key) — known data-model gap
         gap("addq_error_not_suppressed",
-            "ADDQ succeeded instead of returning ST_IX "
-            "(EXISTS may not detect JSON keys correctly)")
+            "ADDQ succeeded instead of returning ST_IX — no JSON commands "
+            "means SET never stored the key, so EXISTS returns 0")
     else:
         chk("addq_error_not_suppressed", False,
             f"unexpected response: {r1}")
@@ -233,8 +301,8 @@ def test_quiet_deleteq():
         # First DELETEQ responded with ST_NF — key not found
         if r1["status"] == ST_NF:
             gap("deleteq_success_suppressed",
-                "DELETEQ returned ST_NF for key that SET succeeded on "
-                "(known JSON/DEL interaction gap)")
+                "DELETEQ returned ST_NF — no JSON commands means SET "
+                "never stored the key, so DEL returns 0")
         else:
             chk("deleteq_success_suppressed", False,
                 f"DELETEQ success not suppressed: {r1}")
@@ -265,7 +333,7 @@ def test_cas_set_success():
 
 def test_cas_errors_zero():
     """Error/control responses → CAS_ZERO. Uses separate connections
-    because GET miss may kill the connection (known JSON.GET issue)."""
+    because GET miss kills the connection (JSON.GET unknown command)."""
     # DELETE miss → CAS_ZERO (uses DEL which works without JSON)
     s = conn()
     s.sendall(build_req(OP_DELETE, opaque=611, key=tkey("cas_no2")))
@@ -298,7 +366,8 @@ def test_cas_errors_zero():
             f"GET miss cas={r1['cas']}")
     else:
         gap("cas_get_miss_zero",
-            "GET miss killed connection (known JSON.GET issue)")
+            "GET miss killed connection — JSON.GET is unknown command, "
+            "module propagates as connection error")
 
 
 def test_cas_delete_success():
@@ -323,59 +392,81 @@ def test_cas_delete_success():
             f"CAS={r['cas']}, expected {CAS_PH}")
     elif r and r["status"] == ST_NF:
         gap("cas_delete_success_placeholder",
-            "DELETE returned ST_NF despite SET succeeding "
-            "(known JSON/DEL interaction gap)")
+            "DELETE returned ST_NF — no JSON commands means SET "
+            "never stored the key, so DEL returns 0")
     else:
         chk("cas_delete_success_placeholder", False, f"unexpected: {r}")
 
 
-# ── 9. SET/GET round-trip (current data path via JSON) ──────────
+# ── 9. SET/GET round-trip with direct Redis verification ─────────
 def test_set_get_roundtrip():
-    """SET then GET on same connection. Known gap: GET may fail due to
-    JSON.GET response format incompatibility in current module."""
+    """SET then GET, with direct Redis verification that key was created.
+    Without JSON commands, SET returns ST_OK but creates no key — this is
+    a module bug (silent JSON.SET failure misclassified as success)."""
     s = conn()
     k = tkey("rt")
+    key_str = k.decode()
     val = b'"hello"'
     s.sendall(build_req(OP_SET, opaque=700, extras=set_extras(),
                         key=k, value=val))
     rd = recv_min(s, HDR)
     r1, _ = parse_resp(rd)
-    chk("set_returns_ok", r1 and r1["status"] == ST_OK, f"got {r1}")
 
-    # GET — the current module has a known issue with JSON.GET response
-    # parsing (redis-module String conversion fails). We test and record.
-    s.sendall(build_req(OP_GET, opaque=701, key=k))
-    gd = recv_min(s, HDR)
-    s.close()
-    r2, _ = parse_resp(gd)
-    if r2 and r2["status"] == ST_OK:
-        got_val = r2["body"][r2["extras_len"]:]
-        chk("get_returns_value", got_val == val,
-            f"expected {val!r}, got {got_val!r}")
+    # Module always returns ST_OK — verify the KEY actually exists
+    exists = redis_cli("EXISTS", key_str)
+    if r1 and r1["status"] == ST_OK and exists == "1":
+        chk("set_creates_and_returns_ok", True)
+        # Try GET
+        s.sendall(build_req(OP_GET, opaque=701, key=k))
+        gd = recv_min(s, HDR)
+        s.close()
+        r2, _ = parse_resp(gd)
+        if r2 and r2["status"] == ST_OK:
+            got_val = r2["body"][r2["extras_len"]:]
+            chk("get_returns_value", got_val == val,
+                f"expected {val!r}, got {got_val!r}")
+        else:
+            gap("get_after_set",
+                f"GET failed (JSON.GET response conversion): {r2}")
+    elif r1 and r1["status"] == ST_OK and exists != "1":
+        s.close()
+        chk("set_creates_and_returns_ok", False,
+            f"SET returned ST_OK but key does not exist in Redis "
+            f"(EXISTS={exists}). Module silently swallows JSON.SET "
+            f"failure and misreports success.")
     else:
-        gap("get_after_set",
-            f"GET failed (known JSON.GET conversion issue): {r2}")
+        s.close()
+        chk("set_creates_and_returns_ok", False,
+            f"SET did not return ST_OK: {r1}")
 
 
 # ═════════════════════════════════════════════════════════════════
 # Runner
 # ═════════════════════════════════════════════════════════════════
 ALL_TESTS = [
+    # Preflight: verify environment
+    test_json_dependency,
+    test_set_creates_key,
+    # Protocol framing (no data-path dependency)
     test_noop,
     test_bad_magic,
     test_malformed_frame,
     test_unknown_opcode,
+    # Quiet suppression
     test_quiet_setq_suppressed,
     test_quiet_addq_error_preserved,
     test_quiet_deleteq,
+    # CAS semantics
     test_cas_set_success,
     test_cas_errors_zero,
     test_cas_delete_success,
+    # Data path round-trip
     test_set_get_roundtrip,
 ]
 
 if __name__ == "__main__":
     print(f"RedCouch binary-protocol E2E tests ({HOST}:{PORT})")
+    print(f"JSON available: {JSON_AVAILABLE}")
     print(f"{'=' * 60}")
     for fn in ALL_TESTS:
         print(f"\n▸ {fn.__name__}")

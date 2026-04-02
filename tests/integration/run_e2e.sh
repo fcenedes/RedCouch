@@ -99,13 +99,29 @@ if ! kill -0 "$REDIS_PID" 2>/dev/null; then
     exit 1
 fi
 
+# ── Preflight: check JSON command availability ──────────────────
+echo ""
+echo "Checking JSON command availability..."
+JSON_OK=0
+JSON_RESULT=$(redis-cli -p "$REDIS_PORT" JSON.SET _redcouch_probe '$' '"probe"' 2>&1)
+if echo "$JSON_RESULT" | grep -q "OK"; then
+    redis-cli -p "$REDIS_PORT" DEL _redcouch_probe >/dev/null 2>&1
+    JSON_OK=1
+    echo "  ✅ JSON commands available"
+else
+    echo "  ⚠  JSON commands NOT available: $JSON_RESULT"
+    echo "     The module's data path uses JSON.SET/JSON.GET."
+    echo "     Data-path tests will document this as a missing-dependency gap."
+fi
+export REDCOUCH_JSON_AVAILABLE=$JSON_OK
+
 echo ""
 echo "Running tests..."
 echo ""
 
-# Run the Python test suite
+# Run the Python test suite, passing Redis port for optional direct checks
 EXIT_CODE=0
-python3 "$SCRIPT_DIR/test_binary_protocol.py" || EXIT_CODE=$?
+REDIS_PORT=$REDIS_PORT python3 "$SCRIPT_DIR/test_binary_protocol.py" || EXIT_CODE=$?
 
 echo ""
 if [ $EXIT_CODE -eq 0 ]; then
