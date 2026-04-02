@@ -209,8 +209,13 @@ def flush():
 # ════════════════════════════════════════════════════════════════════
 
 # 1. Quiet-pipeline: batch SETQ+GETQ terminated by NOOP
+#    This is a traffic-generation and stability phase. It verifies that the
+#    server survives pipelined quiet batches without crash or protocol
+#    corruption and that the terminating NOOP is always received. It does
+#    NOT assert per-GETQ hit/miss semantics (that is covered by the
+#    integration/E2E test suite).
 def op_quiet_pipeline(sock):
-    """Send 10 SETQ + 10 GETQ + NOOP, receive only NOOP response."""
+    """Send 10 SETQ + 10 GETQ + NOOP; drain all responses and assert NOOP terminator."""
     buf = b""
     for i in range(10):
         k = next_key(b"qp:")
@@ -220,20 +225,43 @@ def op_quiet_pipeline(sock):
         buf += build_req(OP_GETQ, opaque=100 + i, key=k)
     buf += build_req(OP_NOOP, opaque=999)
     sock.sendall(buf)
-    # Quiet ops suppress responses on success; we get GETQ hits + NOOP
-    # Just drain until we see NOOP (opcode 0x0A)
-    resp = recv_resp(sock)
-    # Drain any remaining queued responses
-    sock.settimeout(0.1)
-    try:
+    # Drain all responses until we see the terminating NOOP.
+    # SETQ suppresses responses on success; GETQ returns on hit; NOOP always responds.
+    data = b""
+    responses = []
+    noop_seen = False
+    deadline = time.monotonic() + TMO
+    while time.monotonic() < deadline:
+        remaining = max(0.1, deadline - time.monotonic())
+        sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(8192)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        data += chunk
+        off = 0
         while True:
-            extra = sock.recv(4096)
-            if not extra:
+            resp, new_off = parse_resp(data, off)
+            if resp is None:
                 break
-    except (socket.timeout, BlockingIOError):
-        pass
+            responses.append(resp)
+            if resp["opcode"] == OP_NOOP:
+                noop_seen = True
+            off = new_off
+        data = data[off:]
+        if noop_seen:
+            break
     sock.settimeout(TMO)
-    return resp
+    # Assert the terminating NOOP was received (protocol integrity check)
+    if not noop_seen:
+        raise RuntimeError("quiet_pipeline: terminating NOOP not received")
+    # The last response must be the NOOP
+    if responses and responses[-1]["opcode"] != OP_NOOP:
+        raise RuntimeError(f"quiet_pipeline: last response was opcode "
+                           f"0x{responses[-1]['opcode']:02x}, expected NOOP")
+    return responses[-1] if responses else None
 
 # 2. Connection churn: rapid connect/disconnect
 def run_connection_churn(duration_s, rate_per_sec=50):
@@ -547,12 +575,30 @@ def main():
     print(f"  Output:         {OUTPUT}")
     print()
 
+    # Capture provenance: Redis version/build and module git info
+    redis_version = "unknown"
+    try:
+        rv = subprocess.run(["redis-server", "--version"],
+                            capture_output=True, text=True, timeout=5)
+        redis_version = rv.stdout.strip()
+    except Exception:
+        pass
+    git_info = "unknown"
+    try:
+        gi = subprocess.run(["git", "describe", "--always", "--dirty", "--tags"],
+                            capture_output=True, text=True, timeout=5)
+        git_info = gi.stdout.strip()
+    except Exception:
+        pass
+
     run_meta = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "host": HOST, "port": PORT,
         "stress_duration_s": STRESS_DUR, "soak_duration_s": SOAK_DUR,
         "client_counts": CLIENTS, "tag": TAG,
         "platform": platform.platform(), "python": platform.python_version(),
+        "redis_version": redis_version,
+        "module_git_ref": git_info,
     }
 
     all_results = []
