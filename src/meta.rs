@@ -589,4 +589,160 @@ mod tests {
         write_meta_flag_echo(&mut out, &flags, b"mykey");
         assert!(out.is_empty());
     }
+
+    // ── parse_meta_command error/edge paths ─────────────────────────
+
+    #[test]
+    fn parse_meta_empty_line() {
+        assert!(matches!(
+            parse_meta_command(b""),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_meta_unknown_prefix() {
+        assert!(matches!(
+            parse_meta_command(b"mx mykey"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_md_missing_key() {
+        assert!(matches!(
+            parse_meta_command(b"md"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ma_missing_key() {
+        assert!(matches!(
+            parse_meta_command(b"ma"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_me_missing_key() {
+        assert!(matches!(
+            parse_meta_command(b"me"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ms_missing_datalen() {
+        assert!(matches!(
+            parse_meta_command(b"ms mykey"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ms_bad_datalen() {
+        assert!(matches!(
+            parse_meta_command(b"ms mykey notanum"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ms_missing_key_and_datalen() {
+        assert!(matches!(
+            parse_meta_command(b"ms"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_meta_non_utf8() {
+        assert!(matches!(
+            parse_meta_command(b"mg \xff\xfe"),
+            MetaParseResult::ClientError(_)
+        ));
+    }
+
+    // ── parse_meta_flags standalone ─────────────────────────────────
+
+    #[test]
+    fn parse_meta_flags_empty_tokens() {
+        let flags = parse_meta_flags(&[]).unwrap();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn parse_meta_flags_empty_string_tokens() {
+        let flags = parse_meta_flags(&["", ""]).unwrap();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn parse_meta_flags_multiple() {
+        let flags = parse_meta_flags(&["v", "T300", "q", "Oopaque"]).unwrap();
+        assert_eq!(flags.len(), 4);
+        assert_eq!(flags[0].ch, b'v');
+        assert!(flags[0].token.is_none());
+        assert_eq!(flags[1].ch, b'T');
+        assert_eq!(flags[1].token.as_deref(), Some("300"));
+    }
+
+    // ── has_flag / get_flag_token standalone ─────────────────────────
+
+    #[test]
+    fn has_flag_returns_false_for_absent() {
+        let flags = parse_meta_flags(&["v", "f"]).unwrap();
+        assert!(!has_flag(&flags, b'q'));
+    }
+
+    #[test]
+    fn get_flag_token_returns_none_for_absent() {
+        let flags = parse_meta_flags(&["v"]).unwrap();
+        assert!(get_flag_token(&flags, b'T').is_none());
+    }
+
+    #[test]
+    fn get_flag_token_returns_none_for_bare_flag() {
+        let flags = parse_meta_flags(&["v"]).unwrap();
+        assert!(get_flag_token(&flags, b'v').is_none());
+    }
+
+    // ── write_meta_flag_echo edge cases ─────────────────────────────
+
+    #[test]
+    fn write_flag_echo_opaque_only() {
+        let flags = parse_meta_flags(&["Otest"]).unwrap();
+        let mut out = Vec::new();
+        write_meta_flag_echo(&mut out, &flags, b"k");
+        assert_eq!(&out, b" Otest");
+    }
+
+    #[test]
+    fn write_flag_echo_key_only() {
+        let flags = parse_meta_flags(&["k"]).unwrap();
+        let mut out = Vec::new();
+        write_meta_flag_echo(&mut out, &flags, b"mykey");
+        assert_eq!(&out, b" kmykey");
+    }
+
+    // ── ms valid mode variants ──────────────────────────────────────
+
+    #[test]
+    fn ms_mode_e_accepted() {
+        let flags = parse_meta_flags(&["ME"]).unwrap();
+        assert!(validate_ms_flags(&flags).is_ok());
+    }
+
+    #[test]
+    fn ms_mode_r_accepted() {
+        let flags = parse_meta_flags(&["MR"]).unwrap();
+        assert!(validate_ms_flags(&flags).is_ok());
+    }
+
+    #[test]
+    fn ma_mode_d_accepted() {
+        let flags = parse_meta_flags(&["MD"]).unwrap();
+        assert!(validate_ma_flags(&flags).is_ok());
+    }
 }

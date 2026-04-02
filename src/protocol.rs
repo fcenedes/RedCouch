@@ -1407,4 +1407,192 @@ mod tests {
         let raw = build_raw_request_frame(0x00, 42, 100, &[1, 2], b"key", b"val");
         assert_eq!(typed, raw);
     }
+
+    // ── parse_request legacy wrapper ────────────────────────────────
+
+    #[test]
+    fn parse_request_returns_some_for_valid() {
+        let frame = build_request_frame(Opcode::Get, 0, 0, &[], b"key", &[]);
+        let result = parse_request(&frame);
+        assert!(result.is_some());
+        let (req, consumed) = result.unwrap();
+        assert_eq!(req.key, b"key");
+        assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn parse_request_returns_none_for_bad_magic() {
+        let mut frame = build_request_frame(Opcode::Get, 0, 0, &[], b"key", &[]);
+        frame[0] = 0xFF; // bad magic
+        assert!(parse_request(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_request_returns_none_for_incomplete() {
+        assert!(parse_request(&[0x80, 0x00]).is_none());
+    }
+
+    #[test]
+    fn parse_request_returns_none_for_empty() {
+        assert!(parse_request(&[]).is_none());
+    }
+
+    // ── write_simple_response ───────────────────────────────────────
+
+    #[test]
+    fn write_simple_response_no_body() {
+        let mut out = Vec::new();
+        write_simple_response(&mut out, Opcode::Noop, ST_OK, 0, 0, &[]).unwrap();
+        assert_eq!(out.len(), HEADER_LEN);
+        assert_eq!(out[0], MAGIC_RES);
+        assert_eq!(out[1], Opcode::Noop as u8);
+        assert_eq!(BigEndian::read_u32(&out[8..12]), 0); // body_len
+    }
+
+    #[test]
+    fn write_simple_response_with_body() {
+        let mut out = Vec::new();
+        write_simple_response(&mut out, Opcode::Version, ST_OK, 0, 0, b"1.0").unwrap();
+        assert_eq!(out.len(), HEADER_LEN + 3);
+        assert_eq!(BigEndian::read_u32(&out[8..12]), 3); // body_len
+        assert_eq!(&out[HEADER_LEN..], b"1.0");
+    }
+
+    // ── write_error_for_raw_opcode ──────────────────────────────────
+
+    #[test]
+    fn write_error_for_raw_opcode_sets_cas_zero() {
+        let mut out = Vec::new();
+        write_error_for_raw_opcode(&mut out, 0xFF, ST_UNK, 42, b"err").unwrap();
+        assert_eq!(BigEndian::read_u64(&out[16..24]), CAS_ZERO);
+        assert_eq!(out[1], 0xFF); // raw opcode preserved
+        assert_eq!(BigEndian::read_u32(&out[12..16]), 42); // opaque
+        assert_eq!(BigEndian::read_u16(&out[6..8]), ST_UNK); // status
+    }
+
+    // ── Opcode includes_key coverage ────────────────────────────────
+
+    #[test]
+    fn includes_key_for_all_variants() {
+        // Key-including opcodes
+        assert!(Opcode::GetK.includes_key());
+        assert!(Opcode::GetKQ.includes_key());
+        assert!(Opcode::GAT.includes_key());
+        assert!(Opcode::GATQ.includes_key());
+        // Non-key-including opcodes
+        assert!(!Opcode::Get.includes_key());
+        assert!(!Opcode::Set.includes_key());
+        assert!(!Opcode::Delete.includes_key());
+        assert!(!Opcode::Noop.includes_key());
+        assert!(!Opcode::GetQ.includes_key());
+    }
+
+    // ── SASL opcodes in quiet/base ──────────────────────────────────
+
+    #[test]
+    fn sasl_opcodes_not_quiet() {
+        assert!(!Opcode::SaslListMechs.is_quiet());
+        assert!(!Opcode::SaslAuth.is_quiet());
+        assert!(!Opcode::SaslStep.is_quiet());
+    }
+
+    #[test]
+    fn sasl_opcodes_base_is_self() {
+        assert_eq!(Opcode::SaslListMechs.base(), Opcode::SaslListMechs);
+        assert_eq!(Opcode::SaslAuth.base(), Opcode::SaslAuth);
+        assert_eq!(Opcode::SaslStep.base(), Opcode::SaslStep);
+    }
+
+    // ── Admin opcodes in quiet/base ─────────────────────────────────
+
+    #[test]
+    fn stat_verbosity_not_quiet() {
+        assert!(!Opcode::Stat.is_quiet());
+        assert!(!Opcode::Verbosity.is_quiet());
+        assert!(!Opcode::Version.is_quiet());
+    }
+
+    #[test]
+    fn touch_not_quiet() {
+        assert!(!Opcode::Touch.is_quiet());
+    }
+
+    // ── build_request_frame field layout ────────────────────────────
+
+    #[test]
+    fn build_request_frame_empty_all() {
+        let frame = build_request_frame(Opcode::Noop, 0, 0, &[], &[], &[]);
+        assert_eq!(frame.len(), HEADER_LEN);
+        assert_eq!(frame[0], MAGIC_REQ);
+        assert_eq!(frame[1], Opcode::Noop as u8);
+        assert_eq!(BigEndian::read_u16(&frame[2..4]), 0); // key_len
+        assert_eq!(frame[4], 0); // extras_len
+        assert_eq!(BigEndian::read_u32(&frame[8..12]), 0); // body_len
+    }
+
+    #[test]
+    fn build_request_frame_with_extras_key_value() {
+        let extras = vec![1, 2, 3, 4];
+        let key = b"testkey";
+        let value = b"testvalue";
+        let frame = build_request_frame(Opcode::Set, 99, 55, &extras, key, value);
+        assert_eq!(frame.len(), HEADER_LEN + 4 + 7 + 9);
+        assert_eq!(BigEndian::read_u16(&frame[2..4]), 7); // key_len
+        assert_eq!(frame[4], 4); // extras_len
+        assert_eq!(BigEndian::read_u32(&frame[8..12]), 20); // body_len
+        assert_eq!(BigEndian::read_u32(&frame[12..16]), 99); // opaque
+        assert_eq!(BigEndian::read_u64(&frame[16..24]), 55); // cas
+        // Verify field layout: extras then key then value
+        assert_eq!(&frame[HEADER_LEN..HEADER_LEN + 4], &extras);
+        assert_eq!(&frame[HEADER_LEN + 4..HEADER_LEN + 11], key);
+        assert_eq!(&frame[HEADER_LEN + 11..], value);
+    }
+
+    // ── try_parse_request: MalformedFrame opaque/opcode preserved ───
+
+    #[test]
+    fn malformed_frame_preserves_opaque_and_opcode() {
+        // Create a frame where extras_len + key_len > body_len
+        let mut frame = [0u8; HEADER_LEN + 4];
+        frame[0] = MAGIC_REQ;
+        frame[1] = Opcode::Set as u8;
+        BigEndian::write_u16(&mut frame[2..4], 10); // key_len = 10
+        frame[4] = 10; // extras_len = 10 — total 20 but body_len = 4
+        BigEndian::write_u32(&mut frame[8..12], 4); // body_len = 4
+        BigEndian::write_u32(&mut frame[12..16], 0xDEAD); // opaque
+        match try_parse_request(&frame) {
+            ParseResult::MalformedFrame {
+                opaque,
+                opcode_byte,
+                bytes_to_skip,
+            } => {
+                assert_eq!(opaque, 0xDEAD);
+                assert_eq!(opcode_byte, Opcode::Set as u8);
+                assert_eq!(bytes_to_skip, HEADER_LEN + 4);
+            }
+            other => panic!("expected MalformedFrame, got {other:?}"),
+        }
+    }
+
+    // ── OversizedFrame: key at exact MAX_KEY_LEN+1 ──────────────────
+
+    #[test]
+    fn oversized_key_at_boundary_plus_one() {
+        let mut frame = [0u8; HEADER_LEN];
+        frame[0] = MAGIC_REQ;
+        frame[1] = Opcode::Get as u8;
+        BigEndian::write_u16(&mut frame[2..4], MAX_KEY_LEN + 1);
+        BigEndian::write_u32(&mut frame[8..12], (MAX_KEY_LEN + 1) as u32);
+        BigEndian::write_u32(&mut frame[12..16], 0xBEEF);
+        match try_parse_request(&frame) {
+            ParseResult::OversizedFrame {
+                opaque,
+                opcode_byte,
+            } => {
+                assert_eq!(opaque, 0xBEEF);
+                assert_eq!(opcode_byte, Opcode::Get as u8);
+            }
+            other => panic!("expected OversizedFrame, got {other:?}"),
+        }
+    }
 }

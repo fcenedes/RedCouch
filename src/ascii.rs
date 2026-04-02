@@ -2475,4 +2475,356 @@ mod tests {
         // "mgx" is not a meta command — must be followed by space or end.
         assert!(!is_meta_command(b"mgx foo"));
     }
+
+    // ── parse_command_line: additional error paths ──────────────────
+
+    #[test]
+    fn parse_empty_line() {
+        assert!(matches!(
+            parse_command_line(b""),
+            CmdParseResult::UnknownCommand
+        ));
+    }
+
+    #[test]
+    fn parse_whitespace_only() {
+        assert!(matches!(
+            parse_command_line(b"   "),
+            CmdParseResult::UnknownCommand
+        ));
+    }
+
+    #[test]
+    fn parse_non_utf8_line() {
+        assert!(matches!(
+            parse_command_line(b"set \xff\xfe 0 0 5"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── cas error paths ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_cas_too_few_args() {
+        assert!(matches!(
+            parse_command_line(b"cas k 0 0"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cas_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"cas k 0 0 5 100 noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cas_bad_cas_value() {
+        assert!(matches!(
+            parse_command_line(b"cas k 0 0 5 notanum"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cas_bad_noreply_token() {
+        assert!(matches!(
+            parse_command_line(b"cas k 0 0 5 100 garbage"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── counter error paths ─────────────────────────────────────────
+
+    #[test]
+    fn parse_incr_too_few_args() {
+        assert!(matches!(
+            parse_command_line(b"incr k"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_decr_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"decr k 5 noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_incr_bad_noreply_token() {
+        assert!(matches!(
+            parse_command_line(b"incr k 5 garbage"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── touch error paths ───────────────────────────────────────────
+
+    #[test]
+    fn parse_touch_too_few_args() {
+        assert!(matches!(
+            parse_command_line(b"touch k"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_touch_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"touch k 60 noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_touch_bad_exptime() {
+        assert!(matches!(
+            parse_command_line(b"touch k notanum"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_touch_bad_noreply_token() {
+        assert!(matches!(
+            parse_command_line(b"touch k 60 garbage"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_touch_noreply() {
+        match parse_command_line(b"touch k 60 noreply") {
+            CmdParseResult::Ok(AsciiCmd::Touch { noreply, .. }) => assert!(noreply),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── gat/gats error paths ────────────────────────────────────────
+
+    #[test]
+    fn parse_gat_no_keys() {
+        assert!(matches!(
+            parse_command_line(b"gat 60"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_gat_bad_exptime() {
+        assert!(matches!(
+            parse_command_line(b"gat notanum k"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_gats_no_keys() {
+        assert!(matches!(
+            parse_command_line(b"gats 0"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── flush_all error paths ───────────────────────────────────────
+
+    #[test]
+    fn parse_flush_bad_arg() {
+        assert!(matches!(
+            parse_command_line(b"flush_all notanum"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── delete error paths ──────────────────────────────────────────
+
+    #[test]
+    fn parse_delete_no_key() {
+        assert!(matches!(
+            parse_command_line(b"delete"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_delete_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"delete k noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── set error paths: bad exptime, bad bytes ─────────────────────
+
+    #[test]
+    fn parse_set_bad_exptime() {
+        assert!(matches!(
+            parse_command_line(b"set k 0 notanum 5"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_set_bad_bytes() {
+        assert!(matches!(
+            parse_command_line(b"set k 0 0 notanum"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_set_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"set k 0 0 5 noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── append/prepend error paths ──────────────────────────────────
+
+    #[test]
+    fn parse_append_too_few_args() {
+        assert!(matches!(
+            parse_command_line(b"append k"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_append_too_many_args() {
+        assert!(matches!(
+            parse_command_line(b"append k 5 noreply extra"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_append_bad_bytes() {
+        assert!(matches!(
+            parse_command_line(b"append k notanum"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_append_bad_noreply_token() {
+        assert!(matches!(
+            parse_command_line(b"append k 5 garbage"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── verbosity noreply ───────────────────────────────────────────
+
+    #[test]
+    fn parse_verbosity_noreply() {
+        match parse_command_line(b"verbosity 2 noreply") {
+            CmdParseResult::Ok(AsciiCmd::Verbosity { noreply }) => assert!(noreply),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── gets with multiple keys ─────────────────────────────────────
+
+    #[test]
+    fn parse_gets_multi() {
+        match parse_command_line(b"gets a b c") {
+            CmdParseResult::Ok(AsciiCmd::Retrieval {
+                cmd: RetrievalOp::Gets,
+                keys,
+                ..
+            }) => assert_eq!(keys.len(), 3),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gets_no_keys() {
+        assert!(matches!(
+            parse_command_line(b"gets"),
+            CmdParseResult::ClientError(_)
+        ));
+    }
+
+    // ── data_block_len and is_noreply for additional variants ───────
+
+    #[test]
+    fn data_block_for_cas() {
+        let cmd = AsciiCmd::Cas {
+            key: b"k",
+            flags: 0,
+            exptime: 0,
+            bytes: 7,
+            cas_unique: 1,
+            noreply: true,
+        };
+        assert!(needs_data_block(&cmd));
+        assert_eq!(data_block_len(&cmd), 7);
+        assert!(is_noreply(&cmd));
+    }
+
+    #[test]
+    fn data_block_for_append_prepend() {
+        let cmd = AsciiCmd::AppendPrepend {
+            is_prepend: true,
+            key: b"k",
+            bytes: 3,
+            noreply: false,
+        };
+        assert!(needs_data_block(&cmd));
+        assert_eq!(data_block_len(&cmd), 3);
+        assert!(!is_noreply(&cmd));
+    }
+
+    #[test]
+    fn is_noreply_for_non_noreply_variants() {
+        assert!(!is_noreply(&AsciiCmd::Version));
+        assert!(!is_noreply(&AsciiCmd::Quit));
+        assert!(!is_noreply(&AsciiCmd::Stats { args: None }));
+        assert!(!is_noreply(&AsciiCmd::Retrieval {
+            cmd: RetrievalOp::Get,
+            exptime: None,
+            keys: vec![b"k"],
+        }));
+    }
+
+    #[test]
+    fn data_block_len_zero_for_non_store() {
+        assert_eq!(
+            data_block_len(&AsciiCmd::Delete {
+                key: b"k",
+                noreply: false
+            }),
+            0
+        );
+    }
+
+    // ── key validation edge cases ───────────────────────────────────
+
+    #[test]
+    fn key_with_tab() {
+        assert!(validate_key(b"has\ttab").is_err());
+    }
+
+    #[test]
+    fn key_with_del() {
+        assert!(validate_key(b"has\x7fchar").is_err());
+    }
+
+    #[test]
+    fn key_high_bytes_ok() {
+        // Bytes > 0x7F are valid in keys (binary-safe above ASCII range).
+        assert!(validate_key(b"\x80\xff").is_ok());
+    }
+
+    // ── meta tab separator ──────────────────────────────────────────
+
+    #[test]
+    fn meta_with_tab_is_meta() {
+        assert!(is_meta_command(b"mg\tkey"));
+    }
 }
