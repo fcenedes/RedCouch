@@ -20,7 +20,9 @@
 #   BENCH_DURATION  - seconds per workload (default 5)
 #   BENCH_CLIENTS   - comma-separated concurrency (default "1,4")
 #   BENCH_TAG       - optional run tag
-#   SKIP_COUCHBASE  - set to "1" to skip Couchbase
+#
+# This runner requires ALL THREE systems to be operational for a valid
+# three-way comparison. It will fail if any system is unreachable.
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -74,17 +76,17 @@ sleep 5
 if redis-cli -p "$REDIS_NATIVE_PORT" PING 2>/dev/null | grep -q "PONG"; then
     echo "  ✅ Redis OSS native ready on port $REDIS_NATIVE_PORT"
 else
-    echo "  ⚠ Redis OSS native not responding on port $REDIS_NATIVE_PORT"
+    echo "ERROR: Redis OSS native not responding on port $REDIS_NATIVE_PORT"
+    echo "  Docker container may not have started. Check: docker compose -f benchmarks/docker-compose.yml logs redis-bench"
+    exit 1
 fi
 
-# 2. Setup Couchbase (if not skipped)
-if [ "${SKIP_COUCHBASE:-0}" != "1" ]; then
-    echo ""
-    bash "$SCRIPT_DIR/setup_couchbase.sh" || {
-        echo "  ⚠ Couchbase setup failed — will skip Couchbase benchmarks"
-        export SKIP_COUCHBASE=1
-    }
-fi
+# 2. Setup Couchbase
+echo ""
+bash "$SCRIPT_DIR/setup_couchbase.sh" || {
+    echo "ERROR: Couchbase setup failed. Cannot run three-system comparison."
+    exit 1
+}
 
 # 3. Start local Redis with RedCouch module
 echo ""
@@ -100,7 +102,8 @@ REDIS_PID=$!
 
 # Wait for RedCouch listener
 echo "Waiting for RedCouch listener on port $MEMCACHED_PORT..."
-for i in $(seq 1 10); do
+REDCOUCH_READY=0
+for i in $(seq 1 15); do
     if python3 -c "
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -113,15 +116,28 @@ except:
     sys.exit(1)
 " 2>/dev/null; then
         echo "  ✅ RedCouch ready after ${i}s"
+        REDCOUCH_READY=1
         break
+    fi
+    if ! kill -0 "$REDIS_PID" 2>/dev/null; then
+        echo "ERROR: Redis+RedCouch process exited. Log:"
+        tail -20 "$REDIS_DIR/redis.log" 2>/dev/null || true
+        exit 1
     fi
     sleep 1
 done
+if [ "$REDCOUCH_READY" -ne 1 ]; then
+    echo "ERROR: RedCouch listener never became ready on port $MEMCACHED_PORT"
+    echo "  Redis log tail:"
+    tail -20 "$REDIS_DIR/redis.log" 2>/dev/null || true
+    exit 1
+fi
 
-# 4. Run cross-system benchmarks
+# 4. Run cross-system benchmarks (all three systems required)
 echo ""
 mkdir -p "$RESULTS_DIR"
 
+BENCH_EXIT=0
 BENCH_OUTPUT="$RESULT_FILE" \
 REDCOUCH_HOST="127.0.0.1" \
 REDCOUCH_PORT="$MEMCACHED_PORT" \
@@ -129,17 +145,38 @@ REDIS_NATIVE_HOST="127.0.0.1" \
 REDIS_NATIVE_PORT="$REDIS_NATIVE_PORT" \
 COUCHBASE_HOST="127.0.0.1" \
 COUCHBASE_PORT="$COUCHBASE_PORT" \
-SKIP_COUCHBASE="${SKIP_COUCHBASE:-0}" \
-    python3 "$SCRIPT_DIR/bench_cross_system.py" || true
+    python3 "$SCRIPT_DIR/bench_cross_system.py" || BENCH_EXIT=$?
 
-# Symlink latest
-if [ -f "$RESULT_FILE" ]; then
-    ln -sf "$(basename "$RESULT_FILE")" "$LATEST_FILE.tmp"
-    mv -f "$LATEST_FILE.tmp" "$LATEST_FILE"
-    echo ""
-    echo "Results: $RESULT_FILE"
-    echo "Symlink: cross_system_latest.json → $(basename "$RESULT_FILE")"
+if [ $BENCH_EXIT -ne 0 ]; then
+    echo "ERROR: Benchmark harness failed with exit code $BENCH_EXIT"
+    exit $BENCH_EXIT
 fi
 
+# Verify the result file was produced
+if [ ! -f "$RESULT_FILE" ]; then
+    echo "ERROR: Expected result file not produced: $RESULT_FILE"
+    exit 1
+fi
+
+# Verify all three systems are present in the results
+SYSTEMS_COUNT=$(python3 -c "
+import json
+with open('$RESULT_FILE') as f:
+    data = json.load(f)
+print(len(data['meta']['systems_tested']))
+" 2>/dev/null || echo "0")
+
+if [ "$SYSTEMS_COUNT" -ne 3 ]; then
+    echo "ERROR: Expected 3 systems in results, found $SYSTEMS_COUNT. Incomplete comparison."
+    exit 1
+fi
+
+# Symlink latest
+ln -sf "$(basename "$RESULT_FILE")" "$LATEST_FILE.tmp"
+mv -f "$LATEST_FILE.tmp" "$LATEST_FILE"
 echo ""
-echo "✅ Cross-system benchmark complete"
+echo "Results: $RESULT_FILE"
+echo "Symlink: cross_system_latest.json → $(basename "$RESULT_FILE")"
+
+echo ""
+echo "✅ Cross-system benchmark complete (all 3 systems verified)"

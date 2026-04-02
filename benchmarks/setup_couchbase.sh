@@ -17,13 +17,19 @@ CB_RAM="${CB_RAM:-256}"
 BASE="http://${CB_HOST}:${CB_PORT}"
 
 echo "Waiting for Couchbase REST API..."
+CB_READY=0
 for i in $(seq 1 60); do
     if curl -sf "${BASE}/pools" >/dev/null 2>&1; then
         echo "  Couchbase API ready after ${i}s"
+        CB_READY=1
         break
     fi
     sleep 1
 done
+if [ "$CB_READY" -ne 1 ]; then
+    echo "ERROR: Couchbase REST API never became available at ${BASE}"
+    exit 1
+fi
 
 # Check if already initialized
 if curl -sf -u "${CB_USER}:${CB_PASS}" "${BASE}/pools/default" >/dev/null 2>&1; then
@@ -59,19 +65,12 @@ else
         -d "ramQuota=${CB_RAM}" \
         -d "authType=sasl" \
         -d "saslPassword=" || {
-        echo "  WARNING: memcached bucket creation failed."
-        echo "  Couchbase Community 7.2+ may have deprecated memcached bucket type."
-        echo "  Trying couchbase bucket type as fallback..."
-        curl -sf -X POST -u "${CB_USER}:${CB_PASS}" \
-            "${BASE}/pools/default/buckets" \
-            -d "name=${CB_BUCKET}" \
-            -d "bucketType=couchbase" \
-            -d "ramQuota=${CB_RAM}" || {
-            echo "  ERROR: Could not create any bucket. Couchbase benchmark will be skipped."
-            exit 1
-        }
-        echo "  Created couchbase-type bucket (not memcached-type)."
-        echo "  NOTE: KV binary protocol should still work but is Couchbase KV, not standard memcached."
+        echo "  ERROR: memcached bucket creation failed."
+        echo "  The cross-system benchmark requires a memcached-type bucket for"
+        echo "  an apples-to-apples memcached binary protocol comparison."
+        echo "  Couchbase Community 7.2.4 supports memcached buckets; if this"
+        echo "  fails, check cluster initialization or Couchbase version."
+        exit 1
     }
     echo "  Waiting for bucket to be ready..."
     sleep 5
