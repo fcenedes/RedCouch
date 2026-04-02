@@ -354,3 +354,86 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 | Deferred work explicitly scoped | ✅ | Meta stale items/UDP/bucket not in GA |
 
 **Recommendation**: **GO** for GA release of the memcached binary + ASCII text protocol over TCP scope on Redis 8+.
+
+---
+
+## 9. Release-Readiness and Publish-Enablement Checklist
+
+This section captures all prerequisites for cutting a release and enabling crates.io publication. Items are grouped by category with explicit status and blockers.
+
+### 9.1 License Verification
+
+| Check | Status | Evidence |
+|---|---|---|
+| `LICENSE` file present at repo root | ✅ | Standard MIT License text, Copyright (c) 2026 RedCouch Contributors |
+| `Cargo.toml` `license` field | ✅ | `license = "MIT"` |
+| `README.md` License section | ✅ | "MIT — see [LICENSE](LICENSE) for details" |
+| `CONTRIBUTING.md` license reference | ✅ | "contributions will be licensed under the MIT License" |
+| `docs/GA_RELEASE.md` crates.io section | ✅ | References MIT license and policy gate |
+| `docs/INSTALL.md` crates.io section | ✅ | References MIT license and policy gate |
+| Source file headers | ℹ️ N/A | No source-header license convention adopted; `LICENSE` file at root is the sole license indicator (standard for Rust crates) |
+| License consistency across all references | ✅ | All references say MIT; no conflicting license mentions anywhere in the repository |
+
+### 9.2 Cargo.toml Metadata for crates.io
+
+| Field | Status | Value |
+|---|---|---|
+| `name` | ✅ | `red_couch` |
+| `version` | ✅ | `0.1.0` |
+| `edition` | ✅ | `2024` |
+| `rust-version` | ✅ | `1.85` |
+| `description` | ✅ | "Redis module bridging Couchbase memcached binary protocol clients to Redis 8+" |
+| `license` | ✅ | `MIT` |
+| `repository` | ✅ | `https://github.com/fcenedes/RedCouch` |
+| `homepage` | ✅ | `https://github.com/fcenedes/RedCouch` |
+| `readme` | ✅ | `README.md` |
+| `keywords` | ✅ | `["redis", "memcached", "couchbase", "module", "protocol"]` |
+| `categories` | ✅ | `["database", "network-programming"]` |
+| `publish` field | ℹ️ | Not set (defaults to `true`). No code change needed — the workflow gate is the publish control. |
+
+### 9.3 GitHub Release Automation
+
+| Check | Status | Evidence |
+|---|---|---|
+| CI workflow (`ci.yml`) | ✅ | Runs on push/PR to `main`; Ubuntu + macOS; check, test, clippy, fmt, doc |
+| Release workflow (`release.yml`) | ✅ | Triggered by `v*` tags; builds 4 targets (Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64) |
+| Test gate before release | ✅ | `test` job runs `cargo test` + `cargo clippy` before artifacts are published |
+| GitHub Release creation | ✅ | `softprops/action-gh-release@v2` with auto-generated release notes and artifact upload |
+| SHA-256 checksums | ✅ | Each target produces `.tar.gz.sha256` alongside `.tar.gz` |
+| Windows targets | ✅ Not included | Correctly excluded — Windows is not a supported target |
+
+### 9.4 crates.io Publication Gate
+
+| Check | Status | Evidence |
+|---|---|---|
+| `publish-crate` job exists in `release.yml` | ✅ | Lines 95–108: runs after build + test + GitHub Release |
+| Gated by `PUBLISH_CRATE` variable | ✅ | `if: ${{ vars.PUBLISH_CRATE == 'true' }}` — disabled by default |
+| `CARGO_REGISTRY_TOKEN` secret required | ✅ | Referenced in the publish step |
+| Documentation of gate in `docs/INSTALL.md` | ✅ | Section "crates.io" explains the policy gate |
+| Documentation of gate in `docs/GA_RELEASE.md` | ✅ | Section 5 "crates.io Publication" explains the policy gate |
+
+### 9.5 Release Process Prerequisites (Maintainer Actions)
+
+Before cutting a release, the maintainer must:
+
+1. **Version bump**: Update `version` in `Cargo.toml` and verify `Cargo.lock` reflects the new version
+2. **Changelog**: Consider adding a `CHANGELOG.md` or rely on GitHub auto-generated release notes
+3. **Tag**: Create and push a `v*` tag (e.g., `git tag v0.1.0 && git push origin v0.1.0`)
+4. **Verify CI**: Ensure the latest `main` commit passes CI before tagging
+5. **Post-release**: Verify the GitHub Release page has all 4 target artifacts with checksums
+
+### 9.6 Items Blocked on Maintainer/Policy Confirmation
+
+| Item | Blocker | What's Ready | What's Needed |
+|---|---|---|---|
+| **crates.io publication** | Explicit maintainer confirmation that MIT is the intended license for public crate distribution | `Cargo.toml` metadata complete, `publish-crate` job exists, `LICENSE` file present | Set `PUBLISH_CRATE=true` as a repository variable and add `CARGO_REGISTRY_TOKEN` secret |
+| **First release tag** | Maintainer decision on release timing | CI, release workflow, documentation, and test suite all ready | Push a `v*` tag to trigger the release workflow |
+
+### 9.7 Verified Facts (Carried Forward)
+
+- ✅ Linux/macOS release automation exists and covers 4 targets
+- ✅ Windows is unsupported and correctly excluded from all workflows and documentation
+- ✅ crates.io publication remains policy-gated pending explicit MIT confirmation
+- ✅ `cargo check` passes, `cargo test` passes with 146 tests (60 binary + 58 ASCII + 28 meta)
+- ✅ Built-ins (EVALSHA migration + non-CAS DELETE bypass), benchmark comparison docs, and open-source documentation set are complete and reflected in `docs/GA_RELEASE.md`
+- ✅ No `package.json` exists (correct: this is a Rust crate, not a Node.js package)
