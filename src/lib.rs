@@ -19,7 +19,7 @@ use protocol::{
     Opcode, Request, try_parse_request, ParseResult,
     write_response, write_simple_response, write_error_for_raw_opcode,
     ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK,
-    CAS_ZERO,
+    CAS_ZERO, MAX_BODY_LEN,
 };
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -367,6 +367,35 @@ return {0, tostring(new_cas)}
    TCP listener (started once from module_init)
    ========================================================= */
 
+/// Default bind address — loopback only to avoid accidental public
+/// exposure.  Override via module args if needed in future.
+#[cfg(not(test))]
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:11210";
+
+/// Maximum number of concurrent client connections.  Beyond this limit
+/// new connections are accepted and immediately closed with an error log.
+#[cfg(not(test))]
+const MAX_CONNECTIONS: u64 = 1024;
+
+/// Socket read timeout — how long a connection can be idle before being
+/// closed.  30 seconds is generous for interactive memcached workloads.
+#[cfg(not(test))]
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Socket write timeout — prevents a stuck client from blocking a thread.
+#[cfg(not(test))]
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum read buffer size per connection.  If the buffer grows beyond
+/// this without producing a complete frame, the connection is closed.
+/// This prevents a slow-drip attack from consuming unbounded memory.
+#[cfg(not(test))]
+const MAX_READ_BUF: usize = (MAX_BODY_LEN as usize) + protocol::HEADER_LEN + 4096;
+
+/// Connection rejection counter.
+#[cfg(not(test))]
+static STAT_REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(not(test))]
 static LISTENER: Once = Once::new();
 
@@ -374,29 +403,53 @@ static LISTENER: Once = Once::new();
 fn spawn_listener() {
     thread::spawn(|| {
         let listener =
-            TcpListener::bind("0.0.0.0:11210").expect("bind :11210 (binary protocol)");
-        listener.set_nonblocking(true).ok();
-        eprintln!("[redcouch] listening on 11210");
+            TcpListener::bind(DEFAULT_BIND_ADDR).expect("bind memcached binary protocol listener");
+        // Use blocking accept — avoids busy-wait polling.
+        listener.set_nonblocking(false).ok();
+        eprintln!("[redcouch] listening on {DEFAULT_BIND_ADDR} (max_connections={MAX_CONNECTIONS})");
 
         for stream in listener.incoming() {
             match stream {
                 Ok(mut sock) => {
+                    // Enforce connection limit.
+                    let current = STAT_CURR_CONNECTIONS.load(Ordering::Relaxed);
+                    if current >= MAX_CONNECTIONS {
+                        STAT_REJECTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[redcouch] connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                        // Drop the socket immediately — client sees connection reset.
+                        drop(sock);
+                        continue;
+                    }
+
                     sock.set_nodelay(true).ok();
+                    sock.set_read_timeout(Some(SOCKET_READ_TIMEOUT)).ok();
+                    sock.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT)).ok();
                     STAT_TOTAL_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                     STAT_CURR_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
                     thread::spawn(move || {
                         if let Err(e) = handle_conn(&mut sock) {
-                            eprintln!("[redcouch] connection error: {e}");
+                            // Don't log read timeouts as errors — they are expected
+                            // for idle connections.
+                            if let BridgeErr::Io(ref io_err) = e {
+                                if io_err.kind() == std::io::ErrorKind::WouldBlock
+                                    || io_err.kind() == std::io::ErrorKind::TimedOut
+                                {
+                                    // Normal idle timeout, suppress log.
+                                } else {
+                                    eprintln!("[redcouch] connection error: {e}");
+                                }
+                            } else {
+                                eprintln!("[redcouch] connection error: {e}");
+                            }
                         }
                         STAT_CURR_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(20));
-                }
                 Err(e) => {
                     eprintln!("[redcouch] accept error: {e}");
-                    break;
+                    // Transient accept errors (e.g. fd exhaustion) — sleep
+                    // briefly and retry rather than killing the listener.
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -423,11 +476,23 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
     let mut buf = BytesMut::with_capacity(4096);
 
     loop {
+        // Guard against unbounded buffer growth.
+        if buf.len() > MAX_READ_BUF {
+            eprintln!("[redcouch] read buffer exceeded {MAX_READ_BUF} bytes, closing connection");
+            return Ok(());
+        }
+
         let mut tmp = [0u8; 4096];
         match sock.read(&mut tmp) {
             Ok(0) => return Ok(()),
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Socket read timeout — close the idle connection.
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+            }
             Err(e) => return Err(e.into()),
         }
 
@@ -446,6 +511,11 @@ fn handle_conn(sock: &mut TcpStream) -> Br<()> {
                     eprintln!("[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
                     write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
                     buf.advance(bytes_to_skip);
+                }
+                ParseResult::OversizedFrame { opaque, opcode_byte } => {
+                    eprintln!("[redcouch] oversized frame (opcode 0x{opcode_byte:02x}), closing connection");
+                    write_error_for_raw_opcode(sock, opcode_byte, ST_ARGS, opaque, b"Frame too large")?;
+                    return Ok(());
                 }
             }
         }
@@ -1235,6 +1305,8 @@ fn op_stat(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
                 ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
                 ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
                 ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
+                ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
+                ("max_connections", MAX_CONNECTIONS.to_string()),
             ];
 
             for (name, value) in &stats {
@@ -1280,7 +1352,14 @@ fn op_verbosity(req: Request<'_>, sock: &mut TcpStream) -> Br<()> {
 fn module_init(ctx: &Context, _args: &[RedisString]) -> Status {
     let _ = STARTUP_INSTANT.set(Instant::now());
     LISTENER.call_once(spawn_listener);
-    ctx.log_notice("redcouch: listener started on 11210");
+    ctx.log_notice(&format!(
+        "redcouch: listener started on {} (max_connections={}, read_timeout={}s, write_timeout={}s, max_body={})",
+        DEFAULT_BIND_ADDR,
+        MAX_CONNECTIONS,
+        SOCKET_READ_TIMEOUT.as_secs(),
+        SOCKET_WRITE_TIMEOUT.as_secs(),
+        MAX_BODY_LEN,
+    ));
     Status::Ok
 }
 

@@ -19,6 +19,18 @@ pub const ST_AUTH_ERROR: u16 = 0x0020;
 pub const ST_AUTH_CONTINUE: u16 = 0x0021;
 pub const ST_UNK: u16 = 0x0081;
 
+// ── Size limits ─────────────────────────────────────────────────────
+/// Maximum allowed body length per frame.  Memcached's default
+/// `item_size_max` is 1 MiB; we allow up to 20 MiB to be generous
+/// while still preventing multi-gigabyte allocations from a single
+/// malicious or buggy frame.
+pub const MAX_BODY_LEN: u32 = 20 * 1024 * 1024; // 20 MiB
+
+/// Maximum allowed key length.  The memcached binary protocol uses a
+/// u16 for key_len (max 65535), but the traditional memcached limit is
+/// 250 bytes.  We enforce the 250-byte limit for compatibility.
+pub const MAX_KEY_LEN: u16 = 250;
+
 // ── CAS policy ──────────────────────────────────────────────────────
 // CAS is now tracked per-item via a Redis-backed monotonic counter
 // (`redcouch:sys:cas_counter`).  Every mutation generates a new CAS
@@ -216,6 +228,14 @@ pub enum ParseResult<T> {
         opcode_byte: u8,
         bytes_to_skip: usize,
     },
+    /// The frame header declares a body_len that exceeds MAX_BODY_LEN
+    /// or a key_len that exceeds MAX_KEY_LEN.  The connection should be
+    /// closed because we cannot safely skip past a potentially huge body
+    /// without reading and discarding it.
+    OversizedFrame {
+        opaque: u32,
+        opcode_byte: u8,
+    },
 }
 
 /// Try to parse one complete request from `buf`.
@@ -236,6 +256,13 @@ pub fn try_parse_request(buf: &[u8]) -> ParseResult<(Request<'_>, usize)> {
         Some(h) => h,
         None => return ParseResult::Incomplete,
     };
+    // Reject oversized frames before attempting to buffer them.
+    if hdr.body_len > MAX_BODY_LEN || hdr.key_len > MAX_KEY_LEN {
+        return ParseResult::OversizedFrame {
+            opaque: hdr.opaque,
+            opcode_byte: hdr.opcode_byte,
+        };
+    }
     let total = HEADER_LEN + hdr.body_len as usize;
     if buf.len() < total {
         return ParseResult::Incomplete;
@@ -575,6 +602,43 @@ mod tests {
                 assert_eq!(bytes_to_skip, HEADER_LEN + 2);
             }
             other => panic!("expected MalformedFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_parse_oversized_body() {
+        // Craft a header that claims body_len > MAX_BODY_LEN.
+        let mut frame = vec![0u8; HEADER_LEN];
+        frame[0] = MAGIC_REQ;
+        frame[1] = 0x01; // Set
+        BigEndian::write_u32(&mut frame[8..12], MAX_BODY_LEN + 1);
+        BigEndian::write_u32(&mut frame[12..16], 55); // opaque
+        match try_parse_request(&frame) {
+            ParseResult::OversizedFrame { opaque, opcode_byte } => {
+                assert_eq!(opaque, 55);
+                assert_eq!(opcode_byte, 0x01);
+            }
+            other => panic!("expected OversizedFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_parse_oversized_key() {
+        // Craft a header with key_len > MAX_KEY_LEN.
+        let key_len = MAX_KEY_LEN + 1;
+        let body_len = key_len as u32;
+        let mut frame = vec![0u8; HEADER_LEN + body_len as usize];
+        frame[0] = MAGIC_REQ;
+        frame[1] = 0x00; // Get
+        BigEndian::write_u16(&mut frame[2..4], key_len);
+        BigEndian::write_u32(&mut frame[8..12], body_len);
+        BigEndian::write_u32(&mut frame[12..16], 66);
+        match try_parse_request(&frame) {
+            ParseResult::OversizedFrame { opaque, opcode_byte } => {
+                assert_eq!(opaque, 66);
+                assert_eq!(opcode_byte, 0x00);
+            }
+            other => panic!("expected OversizedFrame, got {other:?}"),
         }
     }
 
