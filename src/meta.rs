@@ -21,7 +21,11 @@ pub(crate) enum MetaCmd<'a> {
     /// mg <key> [flags]*
     Get { key: &'a [u8], flags: Vec<MetaFlag> },
     /// ms <key> <datalen> [flags]*
-    Set { key: &'a [u8], datalen: u32, flags: Vec<MetaFlag> },
+    Set {
+        key: &'a [u8],
+        datalen: u32,
+        flags: Vec<MetaFlag>,
+    },
     /// md <key> [flags]*
     Delete { key: &'a [u8], flags: Vec<MetaFlag> },
     /// ma <key> [flags]*
@@ -35,7 +39,9 @@ pub(crate) enum MetaCmd<'a> {
 #[derive(Debug)]
 pub(crate) enum MetaParseResult<'a> {
     Ok(MetaCmd<'a>),
-    ClientError(String),
+    // The String payload is read by the `#[cfg(not(test))]` handler in
+    // ascii.rs but appears unused under `--all-targets` test builds.
+    ClientError(#[cfg_attr(test, allow(dead_code))] String),
     /// ms needs a data block of this size
     NeedData(MetaCmd<'a>, u32),
 }
@@ -48,13 +54,17 @@ pub(crate) enum MetaParseResult<'a> {
 pub(crate) fn parse_meta_flags(tokens: &[&str]) -> Result<Vec<MetaFlag>, String> {
     let mut flags = Vec::new();
     for &tok in tokens {
-        if tok.is_empty() { continue; }
+        if tok.is_empty() {
+            continue;
+        }
         let bytes = tok.as_bytes();
         let ch = bytes[0];
         let token = if bytes.len() > 1 {
-            Some(std::str::from_utf8(&bytes[1..])
-                .map_err(|_| "bad flag token encoding".to_string())?
-                .to_string())
+            Some(
+                std::str::from_utf8(&bytes[1..])
+                    .map_err(|_| "bad flag token encoding".to_string())?
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -70,7 +80,10 @@ pub(crate) fn has_flag(flags: &[MetaFlag], ch: u8) -> bool {
 
 /// Get the token for a flag, if present.
 pub(crate) fn get_flag_token(flags: &[MetaFlag], ch: u8) -> Option<&str> {
-    flags.iter().find(|f| f.ch == ch).and_then(|f| f.token.as_deref())
+    flags
+        .iter()
+        .find(|f| f.ch == ch)
+        .and_then(|f| f.token.as_deref())
 }
 
 // ── Supported flag validation ───────────────────────────────────────
@@ -82,7 +95,9 @@ const IGNORED_FLAGS: &[u8] = b"PL";
 pub(crate) fn validate_mg_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"vcfksOqtT";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     validate_numeric_tokens(flags, b"T")?;
@@ -93,7 +108,9 @@ pub(crate) fn validate_mg_flags(flags: &[MetaFlag]) -> Result<(), String> {
 pub(crate) fn validate_ms_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"FTCqOkM";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     // M requires a token; bare M is rejected.
@@ -117,7 +134,9 @@ pub(crate) fn validate_ms_flags(flags: &[MetaFlag]) -> Result<(), String> {
 pub(crate) fn validate_md_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"CqOk";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     validate_numeric_tokens(flags, b"C")?;
@@ -128,7 +147,9 @@ pub(crate) fn validate_md_flags(flags: &[MetaFlag]) -> Result<(), String> {
 pub(crate) fn validate_ma_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"DJNqOkvcM";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     // M requires a token; bare M is rejected.
@@ -148,7 +169,9 @@ pub(crate) fn validate_ma_flags(flags: &[MetaFlag]) -> Result<(), String> {
 pub(crate) fn validate_mn_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"O";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     Ok(())
@@ -158,7 +181,9 @@ pub(crate) fn validate_mn_flags(flags: &[MetaFlag]) -> Result<(), String> {
 pub(crate) fn validate_me_flags(flags: &[MetaFlag]) -> Result<(), String> {
     const SUPPORTED: &[u8] = b"Okq";
     for f in flags {
-        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) { continue; }
+        if SUPPORTED.contains(&f.ch) || IGNORED_FLAGS.contains(&f.ch) {
+            continue;
+        }
         return Err(format!("unsupported meta flag '{}'", f.ch as char));
     }
     Ok(())
@@ -179,10 +204,7 @@ fn validate_numeric_tokens(flags: &[MetaFlag], numeric_flags: &[u8]) -> Result<(
                     }
                 }
                 None => {
-                    return Err(format!(
-                        "flag '{}' requires a numeric token",
-                        f.ch as char
-                    ));
+                    return Err(format!("flag '{}' requires a numeric token", f.ch as char));
                 }
             }
         }
@@ -199,8 +221,6 @@ fn validate_mode_token_present(flags: &[MetaFlag]) -> Result<(), String> {
     }
     Ok(())
 }
-
-
 
 // ── Command parsing ─────────────────────────────────────────────────
 
@@ -265,7 +285,14 @@ fn parse_meta_set<'a>(tokens: &[&'a str]) -> MetaParseResult<'a> {
         Ok(f) => f,
         Err(e) => return MetaParseResult::ClientError(e),
     };
-    MetaParseResult::NeedData(MetaCmd::Set { key, datalen, flags }, datalen)
+    MetaParseResult::NeedData(
+        MetaCmd::Set {
+            key,
+            datalen,
+            flags,
+        },
+        datalen,
+    )
 }
 
 // ── Response helpers ────────────────────────────────────────────────
@@ -340,7 +367,14 @@ mod tests {
     #[test]
     fn parse_ms_basic() {
         match parse_meta_command(b"ms mykey 5 F123 T300") {
-            MetaParseResult::NeedData(MetaCmd::Set { key, datalen, flags }, 5) => {
+            MetaParseResult::NeedData(
+                MetaCmd::Set {
+                    key,
+                    datalen,
+                    flags,
+                },
+                5,
+            ) => {
                 assert_eq!(key, b"mykey");
                 assert_eq!(datalen, 5);
                 assert_eq!(get_flag_token(&flags, b'F'), Some("123"));

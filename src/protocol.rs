@@ -127,15 +127,27 @@ impl Opcode {
         use Opcode::*;
         matches!(
             self,
-            GetQ | GetKQ | SetQ | AddQ | ReplaceQ | DeleteQ
-                | IncrementQ | DecrementQ | QuitQ | FlushQ
-                | AppendQ | PrependQ | GATQ
+            GetQ | GetKQ
+                | SetQ
+                | AddQ
+                | ReplaceQ
+                | DeleteQ
+                | IncrementQ
+                | DecrementQ
+                | QuitQ
+                | FlushQ
+                | AppendQ
+                | PrependQ
+                | GATQ
         )
     }
 
     /// Returns `true` for GETK/GETKQ/GAT/GATQ which echo the key in the response.
     pub fn includes_key(self) -> bool {
-        matches!(self, Opcode::GetK | Opcode::GetKQ | Opcode::GAT | Opcode::GATQ)
+        matches!(
+            self,
+            Opcode::GetK | Opcode::GetKQ | Opcode::GAT | Opcode::GATQ
+        )
     }
 
     /// Returns the "loud" base opcode for a quiet variant, or self if
@@ -232,10 +244,7 @@ pub enum ParseResult<T> {
     /// or a key_len that exceeds MAX_KEY_LEN.  The connection should be
     /// closed because we cannot safely skip past a potentially huge body
     /// without reading and discarding it.
-    OversizedFrame {
-        opaque: u32,
-        opcode_byte: u8,
-    },
+    OversizedFrame { opaque: u32, opcode_byte: u8 },
 }
 
 /// Try to parse one complete request from `buf`.
@@ -301,6 +310,7 @@ pub fn parse_request(buf: &[u8]) -> Option<(Request<'_>, usize)> {
 /// Write a complete binary-protocol response to `w` using a raw opcode byte.
 /// This is the low-level writer; prefer [`write_response`] when you have
 /// a known `Opcode`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_raw_response(
     w: &mut impl Write,
     opcode_byte: u8,
@@ -329,6 +339,7 @@ pub fn write_raw_response(
 }
 
 /// Write a complete binary-protocol response to `w`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_response(
     w: &mut impl Write,
     opcode: Opcode,
@@ -596,7 +607,11 @@ mod tests {
         BigEndian::write_u32(&mut bad[8..12], 2); // body_len=2
         BigEndian::write_u32(&mut bad[12..16], 77); // opaque
         match try_parse_request(&bad) {
-            ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
+            ParseResult::MalformedFrame {
+                opaque,
+                opcode_byte,
+                bytes_to_skip,
+            } => {
                 assert_eq!(opaque, 77);
                 assert_eq!(opcode_byte, 0x00);
                 assert_eq!(bytes_to_skip, HEADER_LEN + 2);
@@ -614,7 +629,10 @@ mod tests {
         BigEndian::write_u32(&mut frame[8..12], MAX_BODY_LEN + 1);
         BigEndian::write_u32(&mut frame[12..16], 55); // opaque
         match try_parse_request(&frame) {
-            ParseResult::OversizedFrame { opaque, opcode_byte } => {
+            ParseResult::OversizedFrame {
+                opaque,
+                opcode_byte,
+            } => {
                 assert_eq!(opaque, 55);
                 assert_eq!(opcode_byte, 0x01);
             }
@@ -634,7 +652,10 @@ mod tests {
         BigEndian::write_u32(&mut frame[8..12], body_len);
         BigEndian::write_u32(&mut frame[12..16], 66);
         match try_parse_request(&frame) {
-            ParseResult::OversizedFrame { opaque, opcode_byte } => {
+            ParseResult::OversizedFrame {
+                opaque,
+                opcode_byte,
+            } => {
                 assert_eq!(opaque, 66);
                 assert_eq!(opcode_byte, 0x00);
             }
@@ -709,8 +730,7 @@ mod tests {
     #[test]
     fn write_response_simple() {
         let mut out = Vec::new();
-        write_simple_response(&mut out, Opcode::Noop, ST_OK, 99, 0, &[])
-            .expect("write");
+        write_simple_response(&mut out, Opcode::Noop, ST_OK, 99, 0, &[]).expect("write");
         assert_eq!(out.len(), HEADER_LEN);
         assert_eq!(out[0], MAGIC_RES);
         assert_eq!(out[1], Opcode::Noop as u8);
@@ -722,8 +742,7 @@ mod tests {
     fn write_response_with_body() {
         let mut out = Vec::new();
         let extras = 0u32.to_be_bytes();
-        write_response(&mut out, Opcode::Get, ST_OK, 5, 100, &extras, &[], b"val")
-            .expect("write");
+        write_response(&mut out, Opcode::Get, ST_OK, 5, 100, &extras, &[], b"val").expect("write");
         assert_eq!(out.len(), HEADER_LEN + 4 + 3);
         assert_eq!(out[4], 4);
         assert_eq!(BigEndian::read_u32(&out[8..12]), 7);
@@ -736,9 +755,16 @@ mod tests {
         let mut out = Vec::new();
         let extras = 0u32.to_be_bytes();
         write_response(
-            &mut out, Opcode::GetK, ST_OK, 0, 1,
-            &extras, b"mykey", b"myval",
-        ).expect("write");
+            &mut out,
+            Opcode::GetK,
+            ST_OK,
+            0,
+            1,
+            &extras,
+            b"mykey",
+            b"myval",
+        )
+        .expect("write");
         let key_len = BigEndian::read_u16(&out[2..4]);
         assert_eq!(key_len, 5);
         let key_start = HEADER_LEN + 4;
@@ -750,8 +776,7 @@ mod tests {
     fn write_error_for_unknown_opcode() {
         let mut out = Vec::new();
         let msg = b"Unknown command";
-        write_error_for_raw_opcode(&mut out, 0xFE, ST_UNK, 42, msg)
-            .expect("write");
+        write_error_for_raw_opcode(&mut out, 0xFE, ST_UNK, 42, msg).expect("write");
         assert_eq!(out[0], MAGIC_RES);
         assert_eq!(out[1], 0xFE);
         assert_eq!(BigEndian::read_u16(&out[6..8]), ST_UNK);
@@ -790,7 +815,11 @@ mod tests {
         BigEndian::write_u32(&mut frame[8..12], 6); // body_len
         BigEndian::write_u32(&mut frame[12..16], 123);
         match try_parse_request(&frame) {
-            ParseResult::MalformedFrame { opaque, bytes_to_skip, .. } => {
+            ParseResult::MalformedFrame {
+                opaque,
+                bytes_to_skip,
+                ..
+            } => {
                 assert_eq!(opaque, 123);
                 assert_eq!(bytes_to_skip, HEADER_LEN + 6);
             }
@@ -808,14 +837,20 @@ mod tests {
         ok_frame[1] = Opcode::Set as u8;
         BigEndian::write_u32(&mut ok_frame[8..12], MAX_BODY_LEN);
         // Not enough bytes to complete the frame, so we get Incomplete
-        assert!(matches!(try_parse_request(&ok_frame), ParseResult::Incomplete));
+        assert!(matches!(
+            try_parse_request(&ok_frame),
+            ParseResult::Incomplete
+        ));
 
         // body_len == MAX_BODY_LEN + 1 → OversizedFrame
         let mut bad_frame = vec![0u8; HEADER_LEN];
         bad_frame[0] = MAGIC_REQ;
         bad_frame[1] = Opcode::Set as u8;
         BigEndian::write_u32(&mut bad_frame[8..12], MAX_BODY_LEN + 1);
-        assert!(matches!(try_parse_request(&bad_frame), ParseResult::OversizedFrame { .. }));
+        assert!(matches!(
+            try_parse_request(&bad_frame),
+            ParseResult::OversizedFrame { .. }
+        ));
     }
 
     /// Regression: key_len == MAX_KEY_LEN (250) should be accepted;
@@ -828,7 +863,10 @@ mod tests {
         ok_hdr[1] = Opcode::Get as u8;
         BigEndian::write_u16(&mut ok_hdr[2..4], MAX_KEY_LEN); // 250
         BigEndian::write_u32(&mut ok_hdr[8..12], MAX_KEY_LEN as u32);
-        assert!(matches!(try_parse_request(&ok_hdr), ParseResult::Incomplete));
+        assert!(matches!(
+            try_parse_request(&ok_hdr),
+            ParseResult::Incomplete
+        ));
 
         // key_len = 251 → OversizedFrame
         let mut bad_hdr = vec![0u8; HEADER_LEN];
@@ -836,7 +874,10 @@ mod tests {
         bad_hdr[1] = Opcode::Get as u8;
         BigEndian::write_u16(&mut bad_hdr[2..4], MAX_KEY_LEN + 1);
         BigEndian::write_u32(&mut bad_hdr[8..12], (MAX_KEY_LEN + 1) as u32);
-        assert!(matches!(try_parse_request(&bad_hdr), ParseResult::OversizedFrame { .. }));
+        assert!(matches!(
+            try_parse_request(&bad_hdr),
+            ParseResult::OversizedFrame { .. }
+        ));
     }
 
     /// Regression: DELETE success CAS — the response builder must put
@@ -846,8 +887,7 @@ mod tests {
     fn regression_delete_success_cas_nonzero_in_response() {
         let mut out = Vec::new();
         let delete_cas: u64 = 42;
-        write_simple_response(&mut out, Opcode::Delete, ST_OK, 1, delete_cas, &[])
-            .expect("write");
+        write_simple_response(&mut out, Opcode::Delete, ST_OK, 1, delete_cas, &[]).expect("write");
         let response_cas = BigEndian::read_u64(&out[16..24]);
         assert_ne!(response_cas, 0, "DELETE success must carry a non-zero CAS");
         assert_eq!(response_cas, 42);
@@ -936,7 +976,10 @@ mod tests {
         for opcode in [Opcode::Get, Opcode::Set, Opcode::Noop, Opcode::Quit] {
             let mut out = Vec::new();
             write_simple_response(&mut out, opcode, ST_OK, 0, 0, &[]).unwrap();
-            assert_eq!(out[0], MAGIC_RES, "opcode {opcode:?} response must start with 0x81");
+            assert_eq!(
+                out[0], MAGIC_RES,
+                "opcode {opcode:?} response must start with 0x81"
+            );
         }
     }
 
@@ -1011,9 +1054,17 @@ mod tests {
     #[test]
     fn property_consumed_equals_header_plus_body() {
         let opcodes = [
-            Opcode::Get, Opcode::Set, Opcode::Delete, Opcode::Noop,
-            Opcode::Increment, Opcode::Append, Opcode::Touch, Opcode::GAT,
-            Opcode::Flush, Opcode::Version, Opcode::Stat,
+            Opcode::Get,
+            Opcode::Set,
+            Opcode::Delete,
+            Opcode::Noop,
+            Opcode::Increment,
+            Opcode::Append,
+            Opcode::Touch,
+            Opcode::GAT,
+            Opcode::Flush,
+            Opcode::Version,
+            Opcode::Stat,
         ];
         let extras_sizes = [0, 4, 8, 20];
         let key_sizes = [0, 1, 5, 50];
@@ -1030,13 +1081,18 @@ mod tests {
 
                         let expected_body = elen + klen + vlen;
                         let expected_total = HEADER_LEN + expected_body;
-                        assert_eq!(frame.len(), expected_total,
-                            "opcode={op:?} e={elen} k={klen} v={vlen}");
+                        assert_eq!(
+                            frame.len(),
+                            expected_total,
+                            "opcode={op:?} e={elen} k={klen} v={vlen}"
+                        );
 
                         match try_parse_request(&frame) {
                             ParseResult::Ok((req, consumed)) => {
-                                assert_eq!(consumed, expected_total,
-                                    "opcode={op:?} consumed mismatch");
+                                assert_eq!(
+                                    consumed, expected_total,
+                                    "opcode={op:?} consumed mismatch"
+                                );
                                 assert_eq!(req.extras.len(), elen);
                                 assert_eq!(req.key.len(), klen);
                                 assert_eq!(req.value.len(), vlen);
@@ -1093,7 +1149,11 @@ mod tests {
         assert_eq!(r2.hdr.opaque, 2);
         assert_eq!(r2.key, b"k2");
 
-        assert_eq!(c1 + c2, buf.len(), "total consumed must equal buffer length");
+        assert_eq!(
+            c1 + c2,
+            buf.len(),
+            "total consumed must equal buffer length"
+        );
     }
 
     /// Trailing bytes after a valid frame don't affect parsing of
@@ -1154,11 +1214,15 @@ mod tests {
         let above = boundary + 1;
         let f_above = above as f64;
         // This is the precision loss: f64 rounds 2^53+1 back to 2^53.
-        assert_ne!(f_above as u64, above,
+        assert_ne!(
+            f_above as u64, above,
             "2^53+1 should NOT round-trip exactly through f64 — \
-             this is precision loss, not wraparound");
-        assert_eq!(f_above as u64, boundary,
-            "2^53+1 rounds to 2^53 in f64 — precision loss");
+             this is precision loss, not wraparound"
+        );
+        assert_eq!(
+            f_above as u64, boundary,
+            "2^53+1 rounds to 2^53 in f64 — precision loss"
+        );
     }
 
     /// The string format "%.0f" used by the Lua counter script
@@ -1176,7 +1240,10 @@ mod tests {
         assert_eq!(back, 1u64 << 53);
         // Crucially, it's NOT 0 or some negative number — it's a
         // nearby value, demonstrating precision loss not wraparound.
-        assert!(back > 0, "large counter values round, they don't wrap to zero");
+        assert!(
+            back > 0,
+            "large counter values round, they don't wrap to zero"
+        );
     }
 
     /// Counter response is an 8-byte big-endian u64 in the value field.
@@ -1200,7 +1267,10 @@ mod tests {
     /// not a parse error.
     #[test]
     fn edge_single_magic_byte_is_incomplete() {
-        assert!(matches!(try_parse_request(&[MAGIC_REQ]), ParseResult::Incomplete));
+        assert!(matches!(
+            try_parse_request(&[MAGIC_REQ]),
+            ParseResult::Incomplete
+        ));
     }
 
     /// 23 bytes (one short of a header) should be Incomplete.
@@ -1250,12 +1320,24 @@ mod tests {
     /// Verify that the response status field is at bytes [6..8].
     #[test]
     fn response_status_field_position() {
-        let statuses = [ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_AUTH_ERROR, ST_AUTH_CONTINUE, ST_UNK];
+        let statuses = [
+            ST_OK,
+            ST_NF,
+            ST_IX,
+            ST_ARGS,
+            ST_NOT_STORED,
+            ST_AUTH_ERROR,
+            ST_AUTH_CONTINUE,
+            ST_UNK,
+        ];
         for &status in &statuses {
             let mut out = Vec::new();
             write_simple_response(&mut out, Opcode::Get, status, 0, 0, &[]).unwrap();
-            assert_eq!(BigEndian::read_u16(&out[6..8]), status,
-                "status 0x{status:04x} at wrong position");
+            assert_eq!(
+                BigEndian::read_u16(&out[6..8]),
+                status,
+                "status 0x{status:04x} at wrong position"
+            );
         }
     }
 
@@ -1292,15 +1374,15 @@ mod tests {
     #[test]
     fn opcode_coverage_no_gaps_in_valid_range() {
         let valid_bytes: Vec<u8> = vec![
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-            0x20, 0x21, 0x22,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x20, 0x21, 0x22,
         ];
         for b in valid_bytes {
-            assert!(Opcode::parse(b).is_some(),
-                "byte 0x{b:02x} must map to a known opcode");
+            assert!(
+                Opcode::parse(b).is_some(),
+                "byte 0x{b:02x} must map to a known opcode"
+            );
         }
         // Gap at 0x1f must be None.
         assert!(Opcode::parse(0x1f).is_none(), "0x1f must be unknown");

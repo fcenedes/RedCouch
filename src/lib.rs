@@ -8,9 +8,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::needless_return)]
 
-pub mod protocol;
 pub mod ascii;
 pub mod meta;
+pub mod protocol;
 
 #[cfg(not(test))]
 use byteorder::{BigEndian, ByteOrder};
@@ -18,10 +18,9 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
 #[cfg(not(test))]
 use protocol::{
-    Opcode, Request, try_parse_request, ParseResult,
-    write_response, write_simple_response, write_error_for_raw_opcode,
-    ST_OK, ST_NF, ST_IX, ST_ARGS, ST_NOT_STORED, ST_UNK,
-    CAS_ZERO, MAX_BODY_LEN, MAGIC_REQ,
+    CAS_ZERO, MAGIC_REQ, MAX_BODY_LEN, Opcode, ParseResult, Request, ST_ARGS, ST_IX, ST_NF,
+    ST_NOT_STORED, ST_OK, ST_UNK, try_parse_request, write_error_for_raw_opcode, write_response,
+    write_simple_response,
 };
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,13 +39,12 @@ use std::{
 // not during `cargo test`.
 #[cfg(not(test))]
 use redis_module::{
-    DetachedFromClient, redis_module, Context, RedisString,
-    RedisValue, Status, ThreadSafeContext,
+    Context, DetachedFromClient, RedisString, RedisValue, Status, ThreadSafeContext, redis_module,
 };
 
 /* ============================================================
-   Key namespace and system keys
-   ========================================================= */
+Key namespace and system keys
+========================================================= */
 
 /// Prefix for user item keys in Redis.  Client key `foo` maps to
 /// Redis key `rc:foo`.
@@ -58,8 +56,8 @@ pub(crate) const KEY_PREFIX: &[u8] = b"rc:";
 pub(crate) const CAS_COUNTER_KEY: &str = "redcouch:sys:cas_counter";
 
 /* ============================================================
-   Runtime stats counters
-   ========================================================= */
+Runtime stats counters
+========================================================= */
 
 #[cfg(not(test))]
 pub(crate) static STAT_CMD_GET: AtomicU64 = AtomicU64::new(0);
@@ -119,17 +117,28 @@ pub(crate) fn make_redis_key(client_key: &[u8]) -> Vec<u8> {
 #[cfg(not(test))]
 static HEX_DECODE_LUT: [u8; 256] = {
     let mut t = [0xFF_u8; 256];
-    t[b'0' as usize] = 0;  t[b'1' as usize] = 1;
-    t[b'2' as usize] = 2;  t[b'3' as usize] = 3;
-    t[b'4' as usize] = 4;  t[b'5' as usize] = 5;
-    t[b'6' as usize] = 6;  t[b'7' as usize] = 7;
-    t[b'8' as usize] = 8;  t[b'9' as usize] = 9;
-    t[b'a' as usize] = 10; t[b'b' as usize] = 11;
-    t[b'c' as usize] = 12; t[b'd' as usize] = 13;
-    t[b'e' as usize] = 14; t[b'f' as usize] = 15;
-    t[b'A' as usize] = 10; t[b'B' as usize] = 11;
-    t[b'C' as usize] = 12; t[b'D' as usize] = 13;
-    t[b'E' as usize] = 14; t[b'F' as usize] = 15;
+    t[b'0' as usize] = 0;
+    t[b'1' as usize] = 1;
+    t[b'2' as usize] = 2;
+    t[b'3' as usize] = 3;
+    t[b'4' as usize] = 4;
+    t[b'5' as usize] = 5;
+    t[b'6' as usize] = 6;
+    t[b'7' as usize] = 7;
+    t[b'8' as usize] = 8;
+    t[b'9' as usize] = 9;
+    t[b'a' as usize] = 10;
+    t[b'b' as usize] = 11;
+    t[b'c' as usize] = 12;
+    t[b'd' as usize] = 13;
+    t[b'e' as usize] = 14;
+    t[b'f' as usize] = 15;
+    t[b'A' as usize] = 10;
+    t[b'B' as usize] = 11;
+    t[b'C' as usize] = 12;
+    t[b'D' as usize] = 13;
+    t[b'E' as usize] = 14;
+    t[b'F' as usize] = 15;
     t
 };
 
@@ -159,8 +168,8 @@ pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
 }
 
 /* ============================================================
-   Lua scripts for atomic operations
-   ========================================================= */
+Lua scripts for atomic operations
+========================================================= */
 
 /// Lua script for SET/ADD/REPLACE with atomic CAS check.
 ///
@@ -438,10 +447,10 @@ return count
 "#;
 
 /* ============================================================
-   EVALSHA infrastructure — precompute SHA1 of each Lua script
-   and use EVALSHA with NOSCRIPT fallback for reduced network
-   overhead on every Redis call.
-   ========================================================= */
+EVALSHA infrastructure — precompute SHA1 of each Lua script
+and use EVALSHA with NOSCRIPT fallback for reduced network
+overhead on every Redis call.
+========================================================= */
 
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -456,7 +465,10 @@ pub(crate) struct LuaScript {
 #[cfg(not(test))]
 impl LuaScript {
     pub const fn new(source: &'static str) -> Self {
-        Self { source, sha1: OnceLock::new() }
+        Self {
+            source,
+            sha1: OnceLock::new(),
+        }
     }
 
     /// Return the SHA1 hex digest, computing it lazily on first call.
@@ -477,25 +489,25 @@ impl LuaScript {
 
 /// Static script instances for EVALSHA.
 #[cfg(not(test))]
-pub(crate) static SCRIPT_STORE:    LuaScript = LuaScript::new(LUA_STORE);
+pub(crate) static SCRIPT_STORE: LuaScript = LuaScript::new(LUA_STORE);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_GET:      LuaScript = LuaScript::new(LUA_GET);
+pub(crate) static SCRIPT_GET: LuaScript = LuaScript::new(LUA_GET);
 #[cfg(not(test))]
 pub(crate) static SCRIPT_META_GET: LuaScript = LuaScript::new(LUA_META_GET);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_DELETE:   LuaScript = LuaScript::new(LUA_DELETE);
+pub(crate) static SCRIPT_DELETE: LuaScript = LuaScript::new(LUA_DELETE);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_COUNTER:  LuaScript = LuaScript::new(LUA_COUNTER);
+pub(crate) static SCRIPT_COUNTER: LuaScript = LuaScript::new(LUA_COUNTER);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_TOUCH:    LuaScript = LuaScript::new(LUA_TOUCH);
+pub(crate) static SCRIPT_TOUCH: LuaScript = LuaScript::new(LUA_TOUCH);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_GAT:      LuaScript = LuaScript::new(LUA_GAT);
+pub(crate) static SCRIPT_GAT: LuaScript = LuaScript::new(LUA_GAT);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_APPEND:   LuaScript = LuaScript::new(LUA_APPEND);
+pub(crate) static SCRIPT_APPEND: LuaScript = LuaScript::new(LUA_APPEND);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_PREPEND:  LuaScript = LuaScript::new(LUA_PREPEND);
+pub(crate) static SCRIPT_PREPEND: LuaScript = LuaScript::new(LUA_PREPEND);
 #[cfg(not(test))]
-pub(crate) static SCRIPT_FLUSH:    LuaScript = LuaScript::new(LUA_FLUSH);
+pub(crate) static SCRIPT_FLUSH: LuaScript = LuaScript::new(LUA_FLUSH);
 #[cfg(not(test))]
 pub(crate) static SCRIPT_COUNT_ITEMS: LuaScript = LuaScript::new(LUA_COUNT_ITEMS);
 
@@ -541,8 +553,8 @@ pub(crate) fn eval_lua(
 }
 
 /* ============================================================
-   TCP listener (started once from module_init)
-   ========================================================= */
+TCP listener (started once from module_init)
+========================================================= */
 
 /// Default bind address — loopback only to avoid accidental public
 /// exposure.  Override via module args if needed in future.
@@ -591,7 +603,9 @@ fn spawn_listener() {
         };
         // Use blocking accept — avoids busy-wait polling.
         listener.set_nonblocking(false).ok();
-        eprintln!("[redcouch] listening on {DEFAULT_BIND_ADDR} (max_connections={MAX_CONNECTIONS})");
+        eprintln!(
+            "[redcouch] listening on {DEFAULT_BIND_ADDR} (max_connections={MAX_CONNECTIONS})"
+        );
 
         for stream in listener.incoming() {
             match stream {
@@ -600,7 +614,9 @@ fn spawn_listener() {
                     let current = STAT_CURR_CONNECTIONS.load(Ordering::Relaxed);
                     if current >= MAX_CONNECTIONS {
                         STAT_REJECTED_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("[redcouch] connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                        eprintln!(
+                            "[redcouch] connection limit reached ({MAX_CONNECTIONS}), rejecting"
+                        );
                         // Drop the socket immediately — client sees connection reset.
                         drop(sock);
                         continue;
@@ -642,8 +658,8 @@ fn spawn_listener() {
 }
 
 /* ============================================================
-   Connection state machine
-   ========================================================= */
+Connection state machine
+========================================================= */
 
 #[cfg(not(test))]
 #[derive(thiserror::Error, Debug)]
@@ -743,14 +759,37 @@ fn handle_binary_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<()> {
                     eprintln!("[redcouch] bad magic byte, closing connection");
                     return Ok(());
                 }
-                ParseResult::MalformedFrame { opaque, opcode_byte, bytes_to_skip } => {
-                    eprintln!("[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes");
-                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Malformed frame")?;
+                ParseResult::MalformedFrame {
+                    opaque,
+                    opcode_byte,
+                    bytes_to_skip,
+                } => {
+                    eprintln!(
+                        "[redcouch] malformed frame (opcode 0x{opcode_byte:02x}), skipping {bytes_to_skip} bytes"
+                    );
+                    write_error_for_raw_opcode(
+                        &mut out,
+                        opcode_byte,
+                        ST_ARGS,
+                        opaque,
+                        b"Malformed frame",
+                    )?;
                     buf.advance(bytes_to_skip);
                 }
-                ParseResult::OversizedFrame { opaque, opcode_byte } => {
-                    eprintln!("[redcouch] oversized frame (opcode 0x{opcode_byte:02x}), closing connection");
-                    write_error_for_raw_opcode(&mut out, opcode_byte, ST_ARGS, opaque, b"Frame too large")?;
+                ParseResult::OversizedFrame {
+                    opaque,
+                    opcode_byte,
+                } => {
+                    eprintln!(
+                        "[redcouch] oversized frame (opcode 0x{opcode_byte:02x}), closing connection"
+                    );
+                    write_error_for_raw_opcode(
+                        &mut out,
+                        opcode_byte,
+                        ST_ARGS,
+                        opaque,
+                        b"Frame too large",
+                    )?;
                     // Flush the error response before closing.
                     if !out.is_empty() {
                         use std::io::Write;
@@ -786,8 +825,8 @@ fn handle_binary_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<()> {
 }
 
 /* ============================================================
-   Command handlers
-   ========================================================= */
+Command handlers
+========================================================= */
 
 #[cfg(not(test))]
 fn handle(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
@@ -836,7 +875,10 @@ fn handle(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
         // remaining arms are unreachable.
         _ => {
             write_error_for_raw_opcode(
-                out, req.hdr.opcode_byte, ST_UNK, req.hdr.opaque,
+                out,
+                req.hdr.opcode_byte,
+                ST_UNK,
+                req.hdr.opaque,
                 b"Unknown command",
             )?;
             Ok(())
@@ -892,7 +934,8 @@ fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice()];
         eval_lua(ctx, &SCRIPT_GET, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
         return Err(BridgeErr::Redis(format!("EVALSHA get error: {reply:?}")));
@@ -928,15 +971,17 @@ fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
 
     let extras = flags.to_be_bytes();
-    let key_part = if opcode.includes_key() {
-        req.key
-    } else {
-        &[]
-    };
+    let key_part = if opcode.includes_key() { req.key } else { &[] };
 
     write_response(
-        out, opcode, ST_OK, req.hdr.opaque, cas,
-        &extras, key_part, &value_bytes,
+        out,
+        opcode,
+        ST_OK,
+        req.hdr.opaque,
+        cas,
+        &extras,
+        key_part,
+        &value_bytes,
     )?;
     Ok(())
 }
@@ -981,7 +1026,8 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
         return Err(BridgeErr::Redis(format!("EVALSHA store error: {reply:?}")));
@@ -996,7 +1042,9 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             (st, cas_val)
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL store unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL store unexpected: {reply:?}"
+            )));
         }
     };
 
@@ -1009,9 +1057,7 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
                 STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
             }
             if !opcode.is_quiet() {
-                write_response(
-                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
-                )?;
+                write_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[])?;
             }
         }
         -1 => {
@@ -1029,7 +1075,9 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL store unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL store unknown status: {status_code}"
+            )));
         }
     }
     Ok(())
@@ -1045,9 +1093,8 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     // a direct DEL command instead of the Lua script.  This is the common
     // path — most clients don't set CAS on delete.
     if req.hdr.cas == 0 {
-        let reply = with_ctx(|ctx| {
-            ctx.call("DEL", &[rk.as_slice()])
-        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        let reply = with_ctx(|ctx| ctx.call("DEL", &[rk.as_slice()]))
+            .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
         if is_redis_error(&reply) {
             return Err(BridgeErr::Redis(format!("DEL error: {reply:?}")));
@@ -1078,13 +1125,10 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     // CAS-checked DELETE: use Lua script for atomic CAS comparison.
     let req_cas = req.hdr.cas.to_string();
     let reply = with_ctx(|ctx| {
-        let keys_and_args: &[&[u8]] = &[
-            b"1",
-            rk.as_slice(),
-            req_cas.as_bytes(),
-        ];
+        let keys_and_args: &[&[u8]] = &[b"1", rk.as_slice(), req_cas.as_bytes()];
         eval_lua(ctx, &SCRIPT_DELETE, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
         return Err(BridgeErr::Redis(format!("EVALSHA delete error: {reply:?}")));
@@ -1093,7 +1137,9 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let status_code = match &reply {
         RedisValue::Integer(n) => *n,
         _ => {
-            return Err(BridgeErr::Redis(format!("EVALSHA delete unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVALSHA delete unexpected: {reply:?}"
+            )));
         }
     };
 
@@ -1115,7 +1161,9 @@ fn op_delete(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVALSHA delete unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVALSHA delete unknown status: {status_code}"
+            )));
         }
     }
     Ok(())
@@ -1141,9 +1189,9 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
         return Ok(());
     }
 
-    let delta   = BigEndian::read_u64(&req.extras[0..8]);
+    let delta = BigEndian::read_u64(&req.extras[0..8]);
     let initial = BigEndian::read_u64(&req.extras[8..16]);
-    let expiry  = BigEndian::read_u32(&req.extras[16..20]);
+    let expiry = BigEndian::read_u32(&req.extras[16..20]);
     let rk = make_redis_key(req.key);
 
     let is_decr = if base == Opcode::Decrement { "1" } else { "0" };
@@ -1162,10 +1210,13 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_COUNTER, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVALSHA counter error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!(
+            "EVALSHA counter error: {reply:?}"
+        )));
     }
 
     // Parse result: {status, value_string, cas_string}
@@ -1178,7 +1229,9 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             (st, val, cas_val)
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL counter unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL counter unexpected: {reply:?}"
+            )));
         }
     };
 
@@ -1194,8 +1247,14 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             let counter_val: u64 = value_str.parse().unwrap_or(0);
             if !opcode.is_quiet() {
                 write_response(
-                    out, opcode, ST_OK, req.hdr.opaque, new_cas,
-                    &[], &[], &counter_val.to_be_bytes(),
+                    out,
+                    opcode,
+                    ST_OK,
+                    req.hdr.opaque,
+                    new_cas,
+                    &[],
+                    &[],
+                    &counter_val.to_be_bytes(),
                 )?;
             }
         }
@@ -1211,12 +1270,18 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
         -3 => {
             // Non-numeric value
             write_simple_response(
-                out, opcode, ST_ARGS, req.hdr.opaque, CAS_ZERO,
+                out,
+                opcode,
+                ST_ARGS,
+                req.hdr.opaque,
+                CAS_ZERO,
                 b"Non-numeric value",
             )?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL counter unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL counter unknown status: {status_code}"
+            )));
         }
     }
     Ok(())
@@ -1245,7 +1310,8 @@ fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_TOUCH, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
         return Err(BridgeErr::Redis(format!("EVALSHA touch error: {reply:?}")));
@@ -1259,7 +1325,9 @@ fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             (st, cas_val)
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL touch unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL touch unexpected: {reply:?}"
+            )));
         }
     };
 
@@ -1273,7 +1341,9 @@ fn op_touch(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             write_simple_response(out, opcode, ST_NF, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL touch unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL touch unknown status: {status_code}"
+            )));
         }
     }
     Ok(())
@@ -1303,7 +1373,8 @@ fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             expiry_str.as_bytes(),
         ];
         eval_lua(ctx, &SCRIPT_GAT, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
         return Err(BridgeErr::Redis(format!("EVALSHA gat error: {reply:?}")));
@@ -1331,15 +1402,17 @@ fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let cas: u64 = eval_str(&fields[3]).parse().unwrap_or(0);
 
     let extras = flags.to_be_bytes();
-    let key_part = if opcode.includes_key() {
-        req.key
-    } else {
-        &[]
-    };
+    let key_part = if opcode.includes_key() { req.key } else { &[] };
 
     write_response(
-        out, opcode, ST_OK, req.hdr.opaque, cas,
-        &extras, key_part, &value_bytes,
+        out,
+        opcode,
+        ST_OK,
+        req.hdr.opaque,
+        cas,
+        &extras,
+        key_part,
+        &value_bytes,
     )?;
     Ok(())
 }
@@ -1362,7 +1435,11 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let rk = make_redis_key(req.key);
     let req_cas = req.hdr.cas.to_string();
 
-    let script = if base == Opcode::Append { &SCRIPT_APPEND } else { &SCRIPT_PREPEND };
+    let script = if base == Opcode::Append {
+        &SCRIPT_APPEND
+    } else {
+        &SCRIPT_PREPEND
+    };
 
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
@@ -1373,10 +1450,13 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             req_cas.as_bytes(),
         ];
         eval_lua(ctx, script, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if is_redis_error(&reply) {
-        return Err(BridgeErr::Redis(format!("EVALSHA append/prepend error: {reply:?}")));
+        return Err(BridgeErr::Redis(format!(
+            "EVALSHA append/prepend error: {reply:?}"
+        )));
     }
 
     let (status_code, new_cas) = match &reply {
@@ -1387,16 +1467,16 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             (st, cas_val)
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL append/prepend unexpected: {reply:?}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL append/prepend unexpected: {reply:?}"
+            )));
         }
     };
 
     match status_code {
         0 => {
             if !opcode.is_quiet() {
-                write_response(
-                    out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[],
-                )?;
+                write_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[])?;
             }
         }
         -5 => {
@@ -1408,7 +1488,9 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             write_simple_response(out, opcode, ST_IX, req.hdr.opaque, CAS_ZERO, &[])?;
         }
         _ => {
-            return Err(BridgeErr::Redis(format!("EVAL append/prepend unknown status: {status_code}")));
+            return Err(BridgeErr::Redis(format!(
+                "EVAL append/prepend unknown status: {status_code}"
+            )));
         }
     }
     Ok(())
@@ -1424,7 +1506,8 @@ fn op_flush(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[b"0"];
         eval_lua(ctx, &SCRIPT_FLUSH, keys_and_args)
-    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+    })
+    .map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if !opcode.is_quiet() {
         write_simple_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[])?;
@@ -1469,7 +1552,11 @@ fn op_sasl_auth(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     if mechanism != "PLAIN" {
         STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
         write_simple_response(
-            out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+            out,
+            opcode,
+            protocol::ST_AUTH_ERROR,
+            req.hdr.opaque,
+            CAS_ZERO,
             b"Unsupported SASL mechanism",
         )?;
         return Ok(());
@@ -1478,7 +1565,11 @@ fn op_sasl_auth(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     // PLAIN auth: accept any credentials for GA.
     // The value field contains the PLAIN payload: \0<username>\0<password>
     write_simple_response(
-        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
+        out,
+        opcode,
+        ST_OK,
+        req.hdr.opaque,
+        CAS_ZERO,
         b"Authenticated",
     )?;
     Ok(())
@@ -1493,7 +1584,11 @@ fn op_sasl_step(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     STAT_AUTH_CMDS.fetch_add(1, Ordering::Relaxed);
     STAT_AUTH_ERRORS.fetch_add(1, Ordering::Relaxed);
     write_simple_response(
-        out, opcode, protocol::ST_AUTH_ERROR, req.hdr.opaque, CAS_ZERO,
+        out,
+        opcode,
+        protocol::ST_AUTH_ERROR,
+        req.hdr.opaque,
+        CAS_ZERO,
         b"SASL step not expected for PLAIN mechanism",
     )?;
     Ok(())
@@ -1528,75 +1623,134 @@ fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     let opcode = req.hdr.opcode.unwrap();
     let stat_key = std::str::from_utf8(req.key).unwrap_or("");
 
-    match stat_key {
-        "" => {
-            // General stats.
-            let uptime = STARTUP_INSTANT
-                .get()
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0);
-            let pid = std::process::id();
+    if stat_key.is_empty() {
+        // General stats.
+        let uptime = STARTUP_INSTANT
+            .get()
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        let pid = std::process::id();
 
-            // Count current items via EVALSHA SCAN (NOSCRIPT fallback).
-            let curr_items: u64 = match with_ctx(|ctx| {
-                let keys_and_args: &[&[u8]] = &[b"0"];
-                eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
-            }) {
-                Ok(RedisValue::Integer(n)) => n as u64,
-                _ => 0,
-            };
+        // Count current items via EVALSHA SCAN (NOSCRIPT fallback).
+        let curr_items: u64 = match with_ctx(|ctx| {
+            let keys_and_args: &[&[u8]] = &[b"0"];
+            eval_lua(ctx, &SCRIPT_COUNT_ITEMS, keys_and_args)
+        }) {
+            Ok(RedisValue::Integer(n)) => n as u64,
+            _ => 0,
+        };
 
-            let stats: Vec<(&str, String)> = vec![
-                ("pid", pid.to_string()),
-                ("uptime", uptime.to_string()),
-                ("time", std::time::SystemTime::now()
+        let stats: Vec<(&str, String)> = vec![
+            ("pid", pid.to_string()),
+            ("uptime", uptime.to_string()),
+            (
+                "time",
+                std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
-                    .to_string()),
-                ("version", "RedCouch 0.1.0".to_string()),
-                ("curr_items", curr_items.to_string()),
-                ("curr_connections", STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("total_connections", STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
-                ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
-                ("cmd_flush", STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string()),
-                ("cmd_touch", STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string()),
-                ("get_hits", STAT_GET_HITS.load(Ordering::Relaxed).to_string()),
-                ("get_misses", STAT_GET_MISSES.load(Ordering::Relaxed).to_string()),
-                ("delete_hits", STAT_DELETE_HITS.load(Ordering::Relaxed).to_string()),
-                ("delete_misses", STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string()),
-                ("incr_hits", STAT_INCR_HITS.load(Ordering::Relaxed).to_string()),
-                ("incr_misses", STAT_INCR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("decr_hits", STAT_DECR_HITS.load(Ordering::Relaxed).to_string()),
-                ("decr_misses", STAT_DECR_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_hits", STAT_CAS_HITS.load(Ordering::Relaxed).to_string()),
-                ("cas_misses", STAT_CAS_MISSES.load(Ordering::Relaxed).to_string()),
-                ("cas_badval", STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string()),
-                ("auth_cmds", STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string()),
-                ("auth_errors", STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string()),
-                ("rejected_connections", STAT_REJECTED_CONNECTIONS.load(Ordering::Relaxed).to_string()),
-                ("max_connections", MAX_CONNECTIONS.to_string()),
-            ];
+                    .to_string(),
+            ),
+            ("version", "RedCouch 0.1.0".to_string()),
+            ("curr_items", curr_items.to_string()),
+            (
+                "curr_connections",
+                STAT_CURR_CONNECTIONS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "total_connections",
+                STAT_TOTAL_CONNECTIONS.load(Ordering::Relaxed).to_string(),
+            ),
+            ("cmd_get", STAT_CMD_GET.load(Ordering::Relaxed).to_string()),
+            ("cmd_set", STAT_CMD_SET.load(Ordering::Relaxed).to_string()),
+            (
+                "cmd_flush",
+                STAT_CMD_FLUSH.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "cmd_touch",
+                STAT_CMD_TOUCH.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "get_hits",
+                STAT_GET_HITS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "get_misses",
+                STAT_GET_MISSES.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "delete_hits",
+                STAT_DELETE_HITS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "delete_misses",
+                STAT_DELETE_MISSES.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "incr_hits",
+                STAT_INCR_HITS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "incr_misses",
+                STAT_INCR_MISSES.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "decr_hits",
+                STAT_DECR_HITS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "decr_misses",
+                STAT_DECR_MISSES.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "cas_hits",
+                STAT_CAS_HITS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "cas_misses",
+                STAT_CAS_MISSES.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "cas_badval",
+                STAT_CAS_BADVAL.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "auth_cmds",
+                STAT_AUTH_CMDS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "auth_errors",
+                STAT_AUTH_ERRORS.load(Ordering::Relaxed).to_string(),
+            ),
+            (
+                "rejected_connections",
+                STAT_REJECTED_CONNECTIONS
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            ),
+            ("max_connections", MAX_CONNECTIONS.to_string()),
+        ];
 
-            for (name, value) in &stats {
-                write_response(
-                    out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
-                    &[], name.as_bytes(), value.as_bytes(),
-                )?;
-            }
+        for (name, value) in &stats {
+            write_response(
+                out,
+                opcode,
+                ST_OK,
+                req.hdr.opaque,
+                CAS_ZERO,
+                &[],
+                name.as_bytes(),
+                value.as_bytes(),
+            )?;
         }
-        // Unsupported stat groups — return just the terminator.
-        // This includes "settings", "items", "slabs", "conns", etc.
-        // These are intentionally unsupported in the GA release.
-        _ => {}
     }
+    // Unsupported stat groups — return just the terminator.
+    // This includes "settings", "items", "slabs", "conns", etc.
+    // These are intentionally unsupported in the GA release.
 
     // Terminator: empty key + empty value.
-    write_response(
-        out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO,
-        &[], &[], &[],
-    )?;
+    write_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[], &[], &[])?;
     Ok(())
 }
 
@@ -1613,10 +1767,9 @@ fn op_verbosity(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     Ok(())
 }
 
-
 /* ============================================================
-   Module declaration  (allocator + init)
-   ========================================================= */
+Module declaration  (allocator + init)
+========================================================= */
 
 #[cfg(not(test))]
 fn module_init(ctx: &Context, _args: &[RedisString]) -> Status {
