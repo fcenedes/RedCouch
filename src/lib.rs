@@ -10,6 +10,7 @@
 
 pub mod protocol;
 pub mod ascii;
+pub mod meta;
 
 #[cfg(not(test))]
 use byteorder::{BigEndian, ByteOrder};
@@ -197,6 +198,28 @@ if f == false then f = '0' end
 if c == false then c = '0' end
 local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
 return {0, hex, f, c}
+"#;
+
+/// Lua script for meta GET — like LUA_GET but also returns TTL and value size.
+///
+/// KEYS[1] = item key
+///
+/// Returns: {status, hex_value, flags_string, cas_string, ttl, size}
+///   status: 0=OK, -1=NOT_FOUND
+///   ttl: remaining TTL in seconds (-1 = no expiry, -2 = not found)
+///   size: byte length of raw value
+#[cfg(not(test))]
+pub(crate) const LUA_META_GET: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, '', '', '', -2, 0} end
+local v = redis.call('HGET', KEYS[1], 'v')
+local f = redis.call('HGET', KEYS[1], 'f')
+local c = redis.call('HGET', KEYS[1], 'c')
+if v == false then v = '' end
+if f == false then f = '0' end
+if c == false then c = '0' end
+local ttl = redis.call('TTL', KEYS[1])
+local hex = (v:gsub('.', function(ch) return string.format('%02x', string.byte(ch)) end))
+return {0, hex, f, c, ttl, #v}
 "#;
 
 /// Lua script for DELETE with CAS check.

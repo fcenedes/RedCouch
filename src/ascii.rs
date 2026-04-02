@@ -65,7 +65,7 @@ fn find_line_end(buf: &[u8]) -> Option<(usize, usize)> {
 
 // ── Validation / parsing helpers ────────────────────────────────────
 
-fn validate_key(key: &[u8]) -> Result<(), String> {
+pub(crate) fn validate_key(key: &[u8]) -> Result<(), String> {
     if key.is_empty() || key.len() > MAX_KEY_LEN {
         return Err("bad command line format".into());
     }
@@ -309,6 +309,7 @@ use crate::{
     Br, BridgeErr, with_ctx, eval_int, eval_str, hex_decode, make_redis_key,
     CAS_COUNTER_KEY, LUA_STORE, LUA_GET, LUA_DELETE,
     LUA_COUNTER, LUA_TOUCH, LUA_GAT, LUA_APPEND, LUA_PREPEND,
+    LUA_META_GET,
     LUA_COUNT_ITEMS, MAX_CONNECTIONS,
     STAT_CMD_GET, STAT_CMD_SET, STAT_CMD_FLUSH, STAT_CMD_TOUCH,
     STAT_GET_HITS, STAT_GET_MISSES, STAT_DELETE_HITS, STAT_DELETE_MISSES,
@@ -317,6 +318,12 @@ use crate::{
     STAT_CURR_CONNECTIONS, STAT_TOTAL_CONNECTIONS,
     STAT_AUTH_CMDS, STAT_AUTH_ERRORS, STAT_REJECTED_CONNECTIONS,
     STARTUP_INSTANT, is_redis_error,
+};
+#[cfg(not(test))]
+use crate::meta::{
+    MetaCmd, MetaFlag, MetaParseResult, parse_meta_command,
+    has_flag, get_flag_token, write_meta_flag_echo,
+    validate_mg_flags, validate_ms_flags, validate_md_flags, validate_ma_flags,
 };
 #[cfg(not(test))]
 use redis_module::RedisValue;
@@ -349,10 +356,34 @@ pub(crate) fn handle_ascii_conn(sock: &mut TcpStream, buf: &mut BytesMut) -> Br<
 
             // ── Text-path prefix routing ──────────────────────────
             // Meta protocol commands use two-letter prefixes (mg, ms,
-            // md, ma, mn, me) followed by a space.  Route them here
-            // for future support; classic ASCII commands fall through.
+            // md, ma, mn, me) followed by a space.  Route them to the
+            // meta protocol handlers; classic ASCII commands fall through.
             if is_meta_command(&line_bytes) {
-                out.extend_from_slice(b"SERVER_ERROR meta protocol not supported\r\n");
+                match parse_meta_command(&line_bytes) {
+                    MetaParseResult::Ok(cmd) => {
+                        dispatch_meta_cmd(cmd, None, &mut out)?;
+                    }
+                    MetaParseResult::NeedData(cmd, datalen) => {
+                        if datalen > MAX_BODY_LEN as u32 {
+                            out.extend_from_slice(b"CLIENT_ERROR object too large for cache\r\n");
+                            drain_data_block(sock, buf, datalen)?;
+                        } else {
+                            match read_data_block(sock, buf, datalen) {
+                                Ok(data) => {
+                                    dispatch_meta_cmd(cmd, Some(&data), &mut out)?;
+                                }
+                                Err(_) => {
+                                    out.extend_from_slice(b"CLIENT_ERROR bad data chunk\r\n");
+                                }
+                            }
+                        }
+                    }
+                    MetaParseResult::ClientError(msg) => {
+                        out.extend_from_slice(b"CLIENT_ERROR ");
+                        out.extend_from_slice(msg.as_bytes());
+                        out.extend_from_slice(b"\r\n");
+                    }
+                }
                 flush_out(sock, &mut out)?;
                 continue;
             }
@@ -572,6 +603,64 @@ fn dispatch_cmd(cmd: AsciiCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br
                 std::io::ErrorKind::ConnectionAborted,
                 "quit",
             )))
+        }
+    }
+}
+
+// ── Meta protocol dispatch ─────────────────────────────────────────
+
+/// Dispatch a parsed meta command to the appropriate handler.
+#[cfg(not(test))]
+fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br<()> {
+    match cmd {
+        MetaCmd::Noop { flags } => {
+            meta_noop(&flags, out)
+        }
+        MetaCmd::Get { key, flags } => {
+            if let Err(e) = validate_mg_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
+            meta_get(key, &flags, out)
+        }
+        MetaCmd::Set { key, flags, .. } => {
+            if let Err(e) = validate_ms_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
+            meta_set(key, data.unwrap_or(&[]), &flags, out)
+        }
+        MetaCmd::Delete { key, flags } => {
+            if let Err(e) = validate_md_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
+            meta_delete(key, &flags, out)
+        }
+        MetaCmd::Arithmetic { key, flags } => {
+            if let Err(e) = validate_ma_flags(&flags) {
+                out.extend_from_slice(b"CLIENT_ERROR ");
+                out.extend_from_slice(e.as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
+            meta_arithmetic(key, &flags, out)
+        }
+        MetaCmd::Debug { key, flags } => {
+            // me is unsupported — always return EN (not found).
+            let quiet = has_flag(&flags, b'q');
+            if !quiet {
+                out.extend_from_slice(b"EN");
+                write_meta_flag_echo(out, &flags, key);
+                out.extend_from_slice(b"\r\n");
+            }
+            Ok(())
         }
     }
 }
@@ -926,6 +1015,446 @@ return count
     }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
 
     if !noreply { out.extend_from_slice(b"OK\r\n"); }
+    Ok(())
+}
+
+// ── Meta protocol handlers ─────────────────────────────────────────
+
+/// Handle mn (meta noop).
+#[cfg(not(test))]
+fn meta_noop(flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
+    out.extend_from_slice(b"MN");
+    if let Some(opaque) = get_flag_token(flags, b'O') {
+        out.push(b' ');
+        out.push(b'O');
+        out.extend_from_slice(opaque.as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
+/// Handle mg (meta get).
+#[cfg(not(test))]
+fn meta_get(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
+    STAT_CMD_GET.fetch_add(1, Ordering::Relaxed);
+
+    let rk = make_redis_key(key);
+    let want_ttl_update = get_flag_token(flags, b'T');
+
+    let reply = if let Some(ttl_str) = want_ttl_update {
+        // Use GAT to update TTL, then we'll get a second call for TTL info.
+        // Actually, we need the extended meta get that also returns TTL.
+        // Use LUA_META_GET after touch.
+        let exp_str = ttl_str.to_string();
+        with_ctx(|ctx| {
+            // First touch to update TTL.
+            let touch_args: &[&[u8]] = &[
+                LUA_TOUCH.as_bytes(), b"2",
+                rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+                exp_str.as_bytes(),
+            ];
+            ctx.call("EVAL", touch_args)
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+        // Then get with TTL info.
+        with_ctx(|ctx| {
+            let args: &[&[u8]] = &[
+                LUA_META_GET.as_bytes(), b"1", rk.as_slice(),
+            ];
+            ctx.call("EVAL", args)
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+    } else {
+        with_ctx(|ctx| {
+            let args: &[&[u8]] = &[
+                LUA_META_GET.as_bytes(), b"1", rk.as_slice(),
+            ];
+            ctx.call("EVAL", args)
+        }).map_err(|e| BridgeErr::Redis(e.to_string()))?
+    };
+
+    if is_redis_error(&reply) {
+        out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+        return Ok(());
+    }
+
+    // Parse: {status, hex_value, flags_string, cas_string, ttl, size}
+    let (status, hex_val, item_flags, cas_str, ttl, size) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 6 => {
+            let st = eval_int(&arr[0]);
+            let hv = eval_str(&arr[1]);
+            let fl = eval_str(&arr[2]);
+            let cs = eval_str(&arr[3]);
+            let t = eval_int(&arr[4]);
+            let sz = eval_int(&arr[5]);
+            (st, hv, fl, cs, t, sz)
+        }
+        _ => {
+            out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+            return Ok(());
+        }
+    };
+
+    let quiet = has_flag(flags, b'q');
+    if status == -1 {
+        STAT_GET_MISSES.fetch_add(1, Ordering::Relaxed);
+        if !quiet {
+            out.extend_from_slice(b"EN");
+            write_meta_flag_echo(out, flags, key);
+            out.extend_from_slice(b"\r\n");
+        }
+        return Ok(());
+    }
+
+    STAT_GET_HITS.fetch_add(1, Ordering::Relaxed);
+
+    let value = hex_decode(&hex_val);
+    let want_value = has_flag(flags, b'v');
+
+    if want_value {
+        // VA <size> [flags]\r\n<data>\r\n
+        out.extend_from_slice(b"VA ");
+        out.extend_from_slice(value.len().to_string().as_bytes());
+    } else {
+        // HD [flags]\r\n
+        out.extend_from_slice(b"HD");
+    }
+
+    // Append requested metadata flags.
+    if has_flag(flags, b'c') {
+        out.push(b' ');
+        out.push(b'c');
+        out.extend_from_slice(cas_str.as_bytes());
+    }
+    if has_flag(flags, b'f') {
+        out.push(b' ');
+        out.push(b'f');
+        out.extend_from_slice(item_flags.as_bytes());
+    }
+    if has_flag(flags, b's') {
+        out.push(b' ');
+        out.push(b's');
+        out.extend_from_slice(size.to_string().as_bytes());
+    }
+    if has_flag(flags, b't') {
+        out.push(b' ');
+        out.push(b't');
+        // ttl: -1 means no expiry, positive means seconds remaining.
+        let ttl_val = if ttl == -1 { -1 } else { ttl };
+        out.extend_from_slice(ttl_val.to_string().as_bytes());
+    }
+    write_meta_flag_echo(out, flags, key);
+    out.extend_from_slice(b"\r\n");
+
+    if want_value {
+        out.extend_from_slice(&value);
+        out.extend_from_slice(b"\r\n");
+    }
+    Ok(())
+}
+
+/// Handle ms (meta set).
+#[cfg(not(test))]
+fn meta_set(key: &[u8], data: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
+    STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
+
+    let quiet = has_flag(flags, b'q');
+    let mode = get_flag_token(flags, b'M').unwrap_or("S");
+    let item_flags = get_flag_token(flags, b'F').unwrap_or("0");
+    let ttl = get_flag_token(flags, b'T').unwrap_or("0");
+    let cas = get_flag_token(flags, b'C').unwrap_or("0");
+
+    match mode {
+        "A" | "P" => {
+            // Append/Prepend mode.
+            let is_prepend = mode == "P";
+            let lua_script = if is_prepend { LUA_PREPEND } else { LUA_APPEND };
+            let rk = make_redis_key(key);
+            let reply = with_ctx(|ctx| {
+                let args: &[&[u8]] = &[
+                    lua_script.as_bytes(), b"2",
+                    rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+                    data, cas.as_bytes(),
+                ];
+                ctx.call("EVAL", args)
+            }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+            if is_redis_error(&reply) {
+                if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                return Ok(());
+            }
+
+            let (status, cas_val) = match &reply {
+                RedisValue::Array(arr) if arr.len() >= 2 => {
+                    (eval_int(&arr[0]), eval_str(&arr[1]))
+                }
+                _ => {
+                    if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                    return Ok(());
+                }
+            };
+
+            if !quiet {
+                match status {
+                    0 => {
+                        out.extend_from_slice(b"HD");
+                        if has_flag(flags, b'c') || cas != "0" {
+                            out.push(b' ');
+                            out.push(b'c');
+                            out.extend_from_slice(cas_val.as_bytes());
+                        }
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    -5 => {
+                        // NOT_FOUND for append/prepend.
+                        out.extend_from_slice(b"NS");
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    -2 => {
+                        // CAS mismatch.
+                        out.extend_from_slice(b"EX");
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    _ => {
+                        out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                    }
+                }
+            }
+        }
+        _ => {
+            // S (set), E (add), R (replace) modes.
+            let op_name = match mode {
+                "E" => "add",
+                "R" => "replace",
+                _ => "set", // S or default
+            };
+            let rk = make_redis_key(key);
+            let cas_str = cas.to_string();
+            let flags_str = item_flags.to_string();
+            let expiry_str = ttl.to_string();
+
+            let reply = with_ctx(|ctx| {
+                let args: &[&[u8]] = &[
+                    LUA_STORE.as_bytes(), b"2",
+                    rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+                    op_name.as_bytes(), data,
+                    flags_str.as_bytes(), cas_str.as_bytes(), expiry_str.as_bytes(),
+                ];
+                ctx.call("EVAL", args)
+            }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+            if is_redis_error(&reply) {
+                if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                return Ok(());
+            }
+
+            let (status, new_cas) = match &reply {
+                RedisValue::Array(arr) if arr.len() >= 2 => {
+                    (eval_int(&arr[0]), eval_str(&arr[1]))
+                }
+                _ => {
+                    if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+                    return Ok(());
+                }
+            };
+
+            if !quiet {
+                match status {
+                    0 => {
+                        STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
+                        out.extend_from_slice(b"HD");
+                        if has_flag(flags, b'c') || cas != "0" {
+                            out.push(b' ');
+                            out.push(b'c');
+                            out.extend_from_slice(new_cas.as_bytes());
+                        }
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    -1 => {
+                        // NOT_FOUND (replace on missing key, or CAS on missing key).
+                        out.extend_from_slice(b"NF");
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    -2 => {
+                        // KEY_EXISTS (add on existing, or CAS mismatch).
+                        if cas != "0" {
+                            STAT_CAS_BADVAL.fetch_add(1, Ordering::Relaxed);
+                            out.extend_from_slice(b"EX");
+                        } else {
+                            out.extend_from_slice(b"NS");
+                        }
+                        write_meta_flag_echo(out, flags, key);
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    _ => {
+                        out.extend_from_slice(b"SERVER_ERROR internal\r\n");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handle md (meta delete).
+#[cfg(not(test))]
+fn meta_delete(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
+    let rk = make_redis_key(key);
+    let cas = get_flag_token(flags, b'C').unwrap_or("0");
+    let quiet = has_flag(flags, b'q');
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_DELETE.as_bytes(), b"1", rk.as_slice(), cas.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        return Ok(());
+    }
+
+    let status = match &reply {
+        RedisValue::Integer(n) => *n,
+        _ => {
+            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            return Ok(());
+        }
+    };
+
+    match status {
+        0 => {
+            STAT_DELETE_HITS.fetch_add(1, Ordering::Relaxed);
+            if !quiet {
+                out.extend_from_slice(b"HD");
+                write_meta_flag_echo(out, flags, key);
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+        -1 => {
+            STAT_DELETE_MISSES.fetch_add(1, Ordering::Relaxed);
+            if !quiet {
+                out.extend_from_slice(b"NF");
+                write_meta_flag_echo(out, flags, key);
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+        -2 => {
+            // CAS mismatch.
+            if !quiet {
+                out.extend_from_slice(b"EX");
+                write_meta_flag_echo(out, flags, key);
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+        _ => {
+            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        }
+    }
+    Ok(())
+}
+
+/// Handle ma (meta arithmetic).
+#[cfg(not(test))]
+fn meta_arithmetic(key: &[u8], flags: &[MetaFlag], out: &mut Vec<u8>) -> Br<()> {
+    let rk = make_redis_key(key);
+    let quiet = has_flag(flags, b'q');
+
+    let delta_str = get_flag_token(flags, b'D').unwrap_or("1");
+    let mode = get_flag_token(flags, b'M').unwrap_or("I");
+    let is_decr = mode == "D";
+    let is_decr_str = if is_decr { "1" } else { "0" };
+    let initial = get_flag_token(flags, b'J').unwrap_or("0");
+    // N flag = TTL for auto-vivification. Without N, use 4294967295 to signal "do not create".
+    let expiry = get_flag_token(flags, b'N').unwrap_or("4294967295");
+
+    let reply = with_ctx(|ctx| {
+        let args: &[&[u8]] = &[
+            LUA_COUNTER.as_bytes(), b"2",
+            rk.as_slice(), CAS_COUNTER_KEY.as_bytes(),
+            delta_str.as_bytes(), is_decr_str.as_bytes(),
+            initial.as_bytes(), expiry.as_bytes(),
+        ];
+        ctx.call("EVAL", args)
+    }).map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    if is_redis_error(&reply) {
+        if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        return Ok(());
+    }
+
+    let (status, value_str, cas_str) = match &reply {
+        RedisValue::Array(arr) if arr.len() >= 3 => {
+            let st = eval_int(&arr[0]);
+            let val = eval_str(&arr[1]);
+            let cas_s = eval_str(&arr[2]);
+            (st, val, cas_s)
+        }
+        _ => {
+            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+            return Ok(());
+        }
+    };
+
+    if is_decr {
+        if status == 0 { STAT_DECR_HITS.fetch_add(1, Ordering::Relaxed); }
+        else { STAT_DECR_MISSES.fetch_add(1, Ordering::Relaxed); }
+    } else {
+        if status == 0 { STAT_INCR_HITS.fetch_add(1, Ordering::Relaxed); }
+        else { STAT_INCR_MISSES.fetch_add(1, Ordering::Relaxed); }
+    }
+
+    match status {
+        0 => {
+            let want_value = has_flag(flags, b'v');
+            if !quiet {
+                if want_value {
+                    out.extend_from_slice(b"VA ");
+                    out.extend_from_slice(value_str.len().to_string().as_bytes());
+                } else {
+                    out.extend_from_slice(b"HD");
+                }
+                if has_flag(flags, b'c') {
+                    out.push(b' ');
+                    out.push(b'c');
+                    out.extend_from_slice(cas_str.as_bytes());
+                }
+                if has_flag(flags, b't') {
+                    // Return TTL — counter doesn't easily give this, use -1 (no expiry) as default.
+                    // We could query Redis TTL, but that's an extra call. For now use the N flag value
+                    // if it was set and the key was just created, otherwise -1.
+                    out.extend_from_slice(b" t-1");
+                }
+                write_meta_flag_echo(out, flags, key);
+                out.extend_from_slice(b"\r\n");
+                if want_value {
+                    out.extend_from_slice(value_str.as_bytes());
+                    out.extend_from_slice(b"\r\n");
+                }
+            }
+        }
+        -1 => {
+            // NOT_FOUND — key doesn't exist and N flag not present.
+            if !quiet {
+                out.extend_from_slice(b"NF");
+                write_meta_flag_echo(out, flags, key);
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+        -3 => {
+            // NON_NUMERIC — value is not a number.
+            if !quiet {
+                out.extend_from_slice(b"CLIENT_ERROR cannot increment or decrement non-numeric value\r\n");
+            }
+        }
+        _ => {
+            if !quiet { out.extend_from_slice(b"SERVER_ERROR internal\r\n"); }
+        }
+    }
     Ok(())
 }
 
