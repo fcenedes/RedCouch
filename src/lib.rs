@@ -402,8 +402,16 @@ static LISTENER: Once = Once::new();
 #[cfg(not(test))]
 fn spawn_listener() {
     thread::spawn(|| {
-        let listener =
-            TcpListener::bind(DEFAULT_BIND_ADDR).expect("bind memcached binary protocol listener");
+        let listener = match TcpListener::bind(DEFAULT_BIND_ADDR) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "[redcouch] FATAL: cannot bind {DEFAULT_BIND_ADDR}: {e}  \
+                     (is another instance already running?)"
+                );
+                return;
+            }
+        };
         // Use blocking accept — avoids busy-wait polling.
         listener.set_nonblocking(false).ok();
         eprintln!("[redcouch] listening on {DEFAULT_BIND_ADDR} (max_connections={MAX_CONNECTIONS})");
