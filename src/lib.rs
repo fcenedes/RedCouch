@@ -6,7 +6,6 @@
 //! Run   :  redis-server --loadmodule ./target/release/libred_couch.dylib
 
 #![forbid(unsafe_code)]
-#![allow(clippy::needless_return)]
 
 pub mod ascii;
 pub mod meta;
