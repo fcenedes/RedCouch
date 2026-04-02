@@ -294,7 +294,7 @@ nc -z 127.0.0.1 11210   # should succeed
 
 ```bash
 cargo check                                      # Build check
-cargo test                                       # 146 unit/protocol tests
+cargo test                                       # 221 unit/protocol tests
 cd tests/integration && bash run_e2e.sh          # E2E (requires Redis 8+)
 cd benchmarks && bash run_benchmarks.sh          # Benchmark suite
 cd benchmarks && bash run_stress_soak.sh         # Stress/soak suite
@@ -319,9 +319,9 @@ For test architecture details and development workflow, see **[`docs/ARCHITECTUR
 
 | Category | Count | Location |
 |---|---|---|
-| Binary protocol unit tests | 60 | `src/protocol.rs` (via `cargo test`) |
-| ASCII protocol unit tests | 58 | `src/ascii.rs` (via `cargo test`) — 47 parser + 11 meta prefix routing |
-| Meta protocol unit tests | 28 | `src/meta.rs` (via `cargo test`) — parser, flag validation, mode validation, numeric token validation, bare-flag rejection |
+| Binary protocol unit tests | 76 | `src/protocol.rs` (via `cargo test`) |
+| ASCII protocol unit tests | 97 | `src/ascii.rs` (via `cargo test`) — parser, error paths, key validation, meta prefix routing |
+| Meta protocol unit tests | 48 | `src/meta.rs` (via `cargo test`) — parser, flag validation, mode validation, numeric token validation, bare-flag rejection, edge cases |
 | Integration/E2E tests | Suite | `tests/integration/test_binary_protocol.py` |
 | Benchmark workloads | 10+ profiles | `benchmarks/bench_binary_protocol.py` |
 | Stress/soak workloads | 7 phases | `benchmarks/stress_soak_validation.py` |
@@ -351,7 +351,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 
 ### Testing
 
-- [x] **Unit tests pass**: `cargo test` — 146 tests (60 binary + 58 ASCII + 28 meta), 0 failures
+- [x] **Unit tests pass**: `cargo test` — 221 tests (76 binary + 97 ASCII + 48 meta), 0 failures
 - [x] **E2E integration suite**: live Redis 8.4.0 binary-client verification
 - [x] **Benchmark baseline captured**: artifact with provenance tag `verifier-wave9b`
 - [x] **Cross-system comparison**: three-way measured comparison (Couchbase OSS, Redis OSS, RedCouch) with artifact `cross_system_20260402_223529.json`
@@ -460,6 +460,6 @@ Before cutting a release, the maintainer must:
 - ✅ Linux/macOS release automation exists and covers 4 targets
 - ✅ Windows is unsupported and correctly excluded from all workflows and documentation
 - ✅ crates.io publication remains policy-gated pending explicit MIT confirmation
-- ✅ `cargo check` passes, `cargo test` passes with 146 tests (60 binary + 58 ASCII + 28 meta)
+- ✅ `cargo check` passes, `cargo test` passes with 221 tests (76 binary + 97 ASCII + 48 meta)
 - ✅ Built-ins (EVALSHA migration + non-CAS DELETE bypass), benchmark comparison docs, and open-source documentation set are complete and reflected in `docs/GA_RELEASE.md`
 - ✅ No `package.json` exists (correct: this is a Rust crate, not a Node.js package)
