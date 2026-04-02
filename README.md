@@ -1,124 +1,59 @@
-This is a naive, barely tested redis module to support couchdb-memcached binary protocole
+# RedCouch
 
-# Source 
--  https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md
-- https://github.com/RedisLabsModules/redismodule-rs
+A Redis module that bridges **Couchbase memcached binary protocol** clients to Redis 8+, providing a memcached-compatible TCP endpoint backed by Redis data structures.
 
-## Requirements
+**Protocol**: Couchbase memcached binary protocol over TCP (port 11210)
+**Runtime**: Redis Open Source 8.x (verified on 8.4.0)
+**Module name**: `redcouch`
 
-This requires the RedisJson Module (Redis Stack or Redis 8.X OSS)
-This implementation is incomplete
+## References
+
+- [Couchbase memcached binary protocol](https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md)
+- [redis-module-rs](https://github.com/RedisLabsModules/redismodule-rs)
 
 ## Build
 
 ```bash
-cargo build -release
+cargo build --release
 ```
+
+## Run
+
+```bash
+redis-server --loadmodule ./target/release/libred_couch.dylib
+```
+
+The module starts a TCP listener on `127.0.0.1:11210` accepting memcached binary protocol clients.
 
 ## Test
-install some tools for testing
 
 ```bash
-brew tap redis-stack/redis-stack
-brew install libmemcached redis-stack-server redis
+# Unit and protocol tests (60 tests)
+cargo test
+
+# Integration tests (requires Redis 8+ with module loaded)
+cd tests/integration && bash run_e2e.sh
+
+# Benchmarks
+cd benchmarks && bash run_benchmarks.sh
 ```
 
-launch redis with the custom module
+## Supported Operations
 
-```bash
-chmod a+x ./target/release/libred_couch.*
-redis-server --port 6780 --loadmodule ./target/release/libred_couch.dylib
-```
+GET, GETQ, GETK, GETKQ, SET, SETQ, ADD, ADDQ, REPLACE, REPLACEQ, DELETE, DELETEQ, INCREMENT, INCREMENTQ, DECREMENT, DECREMENTQ, APPEND, APPENDQ, PREPEND, PREPENDQ, TOUCH, GAT, GATQ, FLUSH, FLUSHQ, NOOP, QUIT, QUITQ, VERSION, STAT, VERBOSITY, SASL_LIST_MECHS, SASL_AUTH, SASL_STEP.
 
-Expect an output like 
+## Documentation
 
-```bash
-redis-server --port 6780 --loadmodule ./target/release/libred_couch.dylib --loadmodule /opt/homebrew/Caskroom/redis-stack-server/7.4.0-v5/lib/rejson.so
-68016:C 04 Jul 2025 14:31:24.755 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
-68016:C 04 Jul 2025 14:31:24.755 * Redis version=8.0.2, bits=64, commit=00000000, modified=1, pid=68016, just started
-68016:C 04 Jul 2025 14:31:24.755 * Configuration loaded
-68016:M 04 Jul 2025 14:31:24.755 * Increased maximum number of open files to 10032 (it was originally set to 2560).
-68016:M 04 Jul 2025 14:31:24.755 * monotonic clock: POSIX clock_gettime
-                _._                                                  
-           _.-``__ ''-._                                             
-      _.-``    `.  `_.  ''-._           Redis Open Source            
-  .-`` .-```.  ```\/    _.,_ ''-._      8.0.2 (00000000/1) 64 bit
- (    '      ,       .-`  | `,    )     Running in standalone mode
- |`-._`-...-` __...-.``-._|'` _.-'|     Port: 6780
- |    `-._   `._    /     _.-'    |     PID: 68016
-  `-._    `-._  `-./  _.-'    _.-'                                   
- |`-._`-._    `-.__.-'    _.-'_.-'|                                  
- |    `-._`-._        _.-'_.-'    |           https://redis.io       
-  `-._    `-._`-.__.-'_.-'    _.-'                                   
- |`-._`-._    `-.__.-'    _.-'_.-'|                                  
- |    `-._`-._        _.-'_.-'    |                                  
-  `-._    `-._`-.__.-'_.-'    _.-'                                   
-      `-._    `-.__.-'    _.-'                                       
-          `-._        _.-'                                           
-              `-.__.-'                                               
+See [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) for the full GA release documentation including feature/compatibility table, operating envelope, known limitations, configuration reference, benchmark baselines, and release checklist.
 
-68016:M 04 Jul 2025 14:31:24.755 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
-68016:M 04 Jul 2025 14:31:24.756 * <cbbridge> cbbridge: listener started on 11210
-68016:M 04 Jul 2025 14:31:24.756 * Module 'cbbridge' loaded from ./target/release/libred_couch.dylib
-[cbbridge] listening on 11210
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Created new data type 'ReJSON-RL'
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> version: 20808 git sha: unknown branch: unknown
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Exported RedisJSON_V1 API
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Exported RedisJSON_V2 API
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Exported RedisJSON_V3 API
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Exported RedisJSON_V4 API
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Exported RedisJSON_V5 API
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Enabled diskless replication
-68016:M 04 Jul 2025 14:31:24.757 * <ReJSON> Initialized shared string cache, thread safe: false.
-68016:M 04 Jul 2025 14:31:24.757 * Module 'ReJSON' loaded from /opt/homebrew/Caskroom/redis-stack-server/7.4.0-v5/lib/rejson.so
-68016:M 04 Jul 2025 14:31:24.757 * Server initialized
-68016:M 04 Jul 2025 14:31:24.757 * Loading RDB produced by version 8.0.2
-68016:M 04 Jul 2025 14:31:24.757 * RDB age 1 seconds
-68016:M 04 Jul 2025 14:31:24.757 * RDB memory usage when created 1.30 Mb
-68016:M 04 Jul 2025 14:31:24.758 * Done loading RDB, keys loaded: 2, keys expired: 0.
-68016:M 04 Jul 2025 14:31:24.758 * DB loaded from disk: 0.000 seconds
-68016:M 04 Jul 2025 14:31:24.758 * Ready to accept connections tcp
-```
+## Key Design Points
 
-install the pylibmc package
-```bash
-LIBMEMCACHED=/opt/homebrew/Cellar/libmemcached/1.0.18_2/ pip install pylibmc
-pip install redis
-```
+- **Hash-per-item storage**: each item stored as a Redis hash with fields for value (`v`), flags (`f`), and CAS (`c`)
+- **Namespaced keys**: client keys prefixed with `rc:`, system keys under `redcouch:sys:*`
+- **Atomic mutations**: all CAS-sensitive operations use server-side Lua scripts
+- **Binary-safe values**: full binary round-trip via Lua hex encode/decode
+- **Safe defaults**: loopback-only bind, 1024 connection limit, 30s read / 10s write timeouts, 20 MiB frame cap
 
-then try 
+## License
 
-```python
-import pylibmc, json, redis, pprint, time
-
-# --- 1.  binary Memcached client (port 11210) --------------------
-mc = pylibmc.Client(["127.0.0.1:11210"],
-                    binary=True,
-                    behaviors={"tcp_nodelay": True})  # <-- binary=True !
-
-# --- 2.  normal Redis client (port 6379) -------------------------
-rd = redis.Redis(host="127.0.0.1", port=6780)
-
-# ---------------- simple JSON ------------------------------------
-doc = {"foo": "bar", "num": 1}
-mc.set("doc1", json.dumps(doc))
-print("doc1 via Memcached:", mc.get("doc1"))          # <-- bytes
-print("doc1 via Redis    :", rd.execute_command("JSON.GET", "doc1"))
-
-# ---------------- nested JSON ------------------------------------
-nested = {"profile": {"name": "Alice", "age": 30}, "tags": ["red", "blue"]}
-mc.set("user:42", json.dumps(nested))
-print("user:42 via Redis :", rd.execute_command("JSON.GET", "user:42"))
-
-# ---------------- counter (INCR) ---------------------------------
-mc.set("visits", 0)
-mc.incr("visits")
-mc.incr("visits")
-mc.incr("visits")
-print("visits after INCR:", rd.execute_command("JSON.GET", "visits"))
-```
-
-## Disclaimer
-
-Use it as your own risk...
-Good Luck ;-)
+Use at your own risk.
