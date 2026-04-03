@@ -1,3 +1,8 @@
+# GitHub Release is the primary release path for RedCouch.
+# Triggered by pushing a v* tag (e.g. v0.1.0).
+# Produces: GitHub Release with per-target .tar.gz + SHA-256 checksums.
+# crates.io publication is secondary and policy-gated via the PUBLISH_CRATE
+# repository variable — it will not run unless explicitly enabled.
 name: Release
 
 on:
@@ -63,19 +68,37 @@ jobs:
           name: redcouch-${{ matrix.target }}
           path: dist/redcouch-*.tar.gz*
 
+  validate-tag:
+    name: Validate tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version consistency
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "✓ Tag $GITHUB_REF_NAME matches Cargo.toml version $CARGO_VERSION"
+
   test:
     name: Test before release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --check
 
   publish-github:
     name: GitHub Release
-    needs: [build, test]
+    needs: [validate-tag, build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
