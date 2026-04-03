@@ -4,3 +4,5 @@ target/
 book/output/
 __pycache__/
 *.pyc
+.intent
+AGENTS_mem.md
