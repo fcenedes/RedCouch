@@ -50,12 +50,15 @@ echo "════════════════════════�
 echo ""
 
 # 1. Build and start all Docker containers (Redis OSS + Couchbase + RedCouch)
-echo "Building and starting Docker containers..."
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d --build
-echo "  Waiting for containers to be healthy..."
-sleep 5
+#    --wait blocks until every service's healthcheck passes, so we don't need
+#    separate sleep/polling loops.  The RedCouch healthcheck verifies both
+#    Redis RESP and the memcached listener on port 11210.
+echo "Building and starting Docker containers (waiting for health checks)..."
+docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d --build --wait --wait-timeout 120
+echo "  All containers healthy."
 
-# Verify Redis OSS container
+# Belt-and-suspenders: confirm each target is reachable from the host.
+echo ""
 if redis-cli -p "$REDIS_NATIVE_PORT" PING 2>/dev/null | grep -q "PONG"; then
     echo "  ✅ Redis OSS native ready on port $REDIS_NATIVE_PORT"
 else
@@ -71,15 +74,14 @@ bash "$SCRIPT_DIR/setup_couchbase.sh" || {
     exit 1
 }
 
-# 3. Verify RedCouch container is ready
+# 3. Final RedCouch reachability check (should already be healthy from --wait)
 echo ""
-echo "Waiting for RedCouch listener on port $MEMCACHED_PORT..."
 REDCOUCH_READY=0
-for i in $(seq 1 30); do
+for i in $(seq 1 10); do
     if python3 -c "
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(1)
+s.settimeout(2)
 try:
     s.connect(('127.0.0.1', $MEMCACHED_PORT))
     s.close()
@@ -87,14 +89,14 @@ try:
 except:
     sys.exit(1)
 " 2>/dev/null; then
-        echo "  ✅ RedCouch ready after ${i}s"
+        echo "  ✅ RedCouch memcached listener ready on port $MEMCACHED_PORT"
         REDCOUCH_READY=1
         break
     fi
     sleep 1
 done
 if [ "$REDCOUCH_READY" -ne 1 ]; then
-    echo "ERROR: RedCouch listener never became ready on port $MEMCACHED_PORT"
+    echo "ERROR: RedCouch listener not reachable on port $MEMCACHED_PORT"
     echo "  Container logs:"
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" logs redcouch-bench 2>/dev/null | tail -20
     exit 1
