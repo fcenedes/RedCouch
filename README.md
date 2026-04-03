@@ -53,6 +53,7 @@ GET, GETQ, GETK, GETKQ, SET, SETQ, ADD, ADDQ, REPLACE, REPLACEQ, DELETE, DELETEQ
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Installation guide — building from source, GitHub Releases, loading into Redis, troubleshooting |
 | [`docs/GA_RELEASE.md`](docs/GA_RELEASE.md) | GA release documentation — full feature matrix, operating envelope, benchmark baselines, known limitations, release checklist |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributing guide — development workflow, coding standards, PR process |
+| [`SECURITY.md`](SECURITY.md) | Security policy — how to report vulnerabilities |
 
 ## Key Design Points
 
