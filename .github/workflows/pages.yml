@@ -11,6 +11,7 @@ on:
       - 'book/**'
       - 'book.toml'
       - '.github/workflows/pages.yml'
+      - 'Cargo.toml'  # version/description changes affect rustdoc
       - 'src/**'  # rebuild API docs when source changes
   workflow_dispatch:
 
@@ -40,10 +41,11 @@ jobs:
       - name: Build book
         run: mdbook build
 
-      - name: Build API reference (rustdoc)
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: |
+      - name: Build API reference (rustdoc)
+        run: |
           RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
           # Place rustdoc output alongside the book under /api/
           cp -r target/doc book/output/api
