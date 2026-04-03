@@ -6,17 +6,27 @@ use byteorder::{BigEndian, ByteOrder};
 use std::io::{self, Write};
 
 // ── Magic bytes ──────────────────────────────────────────────────────
+/// Magic byte for a binary-protocol **request** frame (`0x80`).
 pub const MAGIC_REQ: u8 = 0x80;
+/// Magic byte for a binary-protocol **response** frame (`0x81`).
 pub const MAGIC_RES: u8 = 0x81;
 
 // ── Status codes ─────────────────────────────────────────────────────
+/// Success status (`0x0000`).
 pub const ST_OK: u16 = 0x0000;
+/// Key not found (`0x0001`).
 pub const ST_NF: u16 = 0x0001;
+/// Key exists (used by `ADD` when key already present) (`0x0002`).
 pub const ST_IX: u16 = 0x0002;
+/// Invalid arguments (`0x0004`).
 pub const ST_ARGS: u16 = 0x0004;
+/// Item not stored (CAS mismatch or `REPLACE` on missing key) (`0x0005`).
 pub const ST_NOT_STORED: u16 = 0x0005;
+/// Authentication error (`0x0020`).
 pub const ST_AUTH_ERROR: u16 = 0x0020;
+/// Authentication continue (multi-step SASL) (`0x0021`).
 pub const ST_AUTH_CONTINUE: u16 = 0x0021;
+/// Unknown command (`0x0081`).
 pub const ST_UNK: u16 = 0x0081;
 
 // ── Size limits ─────────────────────────────────────────────────────
@@ -32,13 +42,18 @@ pub const MAX_BODY_LEN: u32 = 20 * 1024 * 1024; // 20 MiB
 pub const MAX_KEY_LEN: u16 = 250;
 
 // ── CAS policy ──────────────────────────────────────────────────────
-// CAS is now tracked per-item via a Redis-backed monotonic counter
-// (`redcouch:sys:cas_counter`).  Every mutation generates a new CAS
-// value from this counter and stores it in the item's hash field `c`.
-// Error and control responses return CAS_ZERO (0).
+/// CAS value used in error and control responses.
+///
+/// CAS is tracked per-item via a Redis-backed monotonic counter
+/// (`redcouch:sys:cas_counter`).  Every mutation generates a new CAS
+/// value from this counter and stores it in the item's hash field `c`.
 pub const CAS_ZERO: u64 = 0;
 
 // ── Opcodes ──────────────────────────────────────────────────────────
+/// Memcached binary-protocol opcode.
+///
+/// Covers the full set of opcodes supported by the RedCouch bridge,
+/// including quiet variants, SASL auth, stats, and touch/GAT commands.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Opcode {
@@ -79,6 +94,8 @@ pub enum Opcode {
 }
 
 impl Opcode {
+    /// Parse a raw opcode byte into an [`Opcode`], returning `None` for
+    /// unrecognised values.
     pub fn parse(b: u8) -> Option<Self> {
         use Opcode::*;
         Some(match b {
@@ -175,8 +192,13 @@ impl Opcode {
 }
 
 // ── Request header ───────────────────────────────────────────────────
+/// Length of a binary-protocol request/response header in bytes.
 pub const HEADER_LEN: usize = 24;
 
+/// Parsed memcached binary-protocol request header.
+///
+/// Contains both the parsed [`Opcode`] (if recognised) and the raw
+/// opcode byte, plus all fixed-width header fields.
 #[derive(Debug)]
 pub struct Header {
     /// Parsed opcode, or `None` if the opcode byte is not recognised.
@@ -214,11 +236,18 @@ impl Header {
 }
 
 // ── Parsed request ───────────────────────────────────────────────────
+/// A fully parsed binary-protocol request, borrowing from the input buffer.
+///
+/// Produced by [`try_parse_request`] on a successful parse.
 #[derive(Debug)]
 pub struct Request<'a> {
+    /// The request header.
     pub hdr: Header,
+    /// Extra data (e.g. flags + expiry for store commands).
     pub extras: &'a [u8],
+    /// The key bytes.
     pub key: &'a [u8],
+    /// The value/body bytes.
     pub value: &'a [u8],
 }
 
@@ -311,8 +340,11 @@ pub fn parse_request(buf: &[u8]) -> Option<(Request<'_>, usize)> {
 /// carries.  Using a struct avoids exceeding clippy's argument limit on
 /// the response-writing functions.
 pub struct ResponseMeta {
+    /// Status code (e.g. [`ST_OK`], [`ST_NF`]).
     pub status: u16,
+    /// Opaque value echoed from the request.
     pub opaque: u32,
+    /// CAS value for the response.
     pub cas: u64,
 }
 

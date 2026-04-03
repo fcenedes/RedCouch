@@ -1,0 +1,29 @@
+[book]
+title = "RedCouch Documentation"
+description = "A Redis module that bridges memcached protocol clients to Redis 8+"
+authors = ["RedCouch Contributors"]
+language = "en"
+src = "book/src"
+
+[build]
+build-dir = "book/output"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/fcenedes/RedCouch"
+edit-url-template = "https://github.com/fcenedes/RedCouch/edit/main/{path}"
+site-url = "/RedCouch/"
+additional-css = ["book/theme/custom.css"]
+
+[output.html.search]
+enable = true
+limit-results = 20
+
+[output.html.print]
+enable = true
+
+[output.html.fold]
+enable = true
+level = 1

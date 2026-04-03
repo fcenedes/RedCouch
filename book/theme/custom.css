@@ -1,0 +1,33 @@
+/* RedCouch Documentation - Custom Theme */
+
+/* Accent color aligned with Redis brand red */
+:root {
+    --sidebar-active: #dc382c;
+}
+
+/* Sidebar active link highlight */
+.sidebar .active {
+    color: var(--sidebar-active);
+}
+
+/* Code blocks: slightly larger font for readability */
+.content code {
+    font-size: 0.9em;
+}
+
+/* Tables: improve readability */
+.content table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.content table th,
+.content table td {
+    padding: 8px 12px;
+    border: 1px solid var(--table-border-color);
+}
+
+/* Status badges in feature tables */
+.content table td:first-child {
+    white-space: nowrap;
+}
