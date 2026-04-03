@@ -285,7 +285,9 @@ The following are **explicitly not in GA scope**:
 
 ## 5. Run, Configuration, and Release Reference
 
-For complete installation instructions, building from source, loading into Redis, troubleshooting, and the release process (including GitHub Release automation and crates.io publication gating), see **[`docs/INSTALL.md`](INSTALL.md)**.
+**GitHub Releases is the primary release channel for RedCouch.** For the complete maintainer runbook — including the step-by-step process to cut a GitHub Release, artifact verification, and optional crates.io enablement — see **[`docs/INSTALL.md`](INSTALL.md#release-process-github-release--primary)**.
+
+For installation instructions, building from source, loading into Redis, and troubleshooting, see **[`docs/INSTALL.md`](INSTALL.md)**.
 
 For runtime constants and architecture details, see **[`docs/ARCHITECTURE.md`](ARCHITECTURE.md)**.
 
@@ -315,9 +317,9 @@ cd benchmarks && bash run_stress_soak.sh         # Stress/soak suite
 bash benchmarks/run_cross_system.sh              # Cross-system comparison (requires Docker)
 ```
 
-### crates.io Publication
+### crates.io Publication (Secondary — Not Required)
 
-Source publication to crates.io is **policy-gated**: `Cargo.toml` metadata is configured, but live publication remains disabled until maintainers explicitly confirm the MIT license for public distribution. The release workflow includes a gated `publish-crate` job controlled by the `PUBLISH_CRATE` repository variable. See [`docs/INSTALL.md`](INSTALL.md#cratesio) for details.
+Source publication to crates.io is **secondary and policy-gated**. It is not part of the primary GitHub Release path. `Cargo.toml` metadata is configured, but live publication remains disabled until maintainers explicitly confirm the MIT license for public distribution. The release workflow includes a gated `publish-crate` job controlled by the `PUBLISH_CRATE` repository variable. See [`docs/INSTALL.md`](INSTALL.md#cratesio-secondary--policy-gated) for enablement steps.
 
 ---
 
@@ -437,37 +439,52 @@ This section captures all prerequisites for cutting a release and enabling crate
 |---|---|---|
 | CI workflow (`ci.yml`) | ✅ | Runs on push/PR to `main`; Ubuntu + macOS; check, test, clippy, fmt, doc |
 | Release workflow (`release.yml`) | ✅ | Triggered by `v*` tags; builds 4 targets (Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64) |
-| Test gate before release | ✅ | `test` job runs `cargo test` + `cargo clippy` before artifacts are published |
+| Tag/version validation (`validate-tag` job) | ✅ | Fails fast if tag version does not match `Cargo.toml` version |
+| Test gate before release | ✅ | `test` job runs `cargo test` + `cargo clippy --all-targets -- -D warnings` + `cargo fmt --check` |
 | GitHub Release creation | ✅ | `softprops/action-gh-release@v2` with auto-generated release notes and artifact upload |
 | SHA-256 checksums | ✅ | Each target produces `.tar.gz.sha256` alongside `.tar.gz` |
 | Windows targets | ✅ Not included | Correctly excluded — Windows is not a supported target |
 
-### 9.4 crates.io Publication Gate
+**GitHub Release is the primary output** of this workflow. No crates.io publication occurs unless explicitly opted in (see Section 9.4).
+
+### 9.4 crates.io Publication Gate (Secondary — Not Required)
+
+crates.io publication is **not part of the primary release path**. It is an optional secondary step, gated by policy.
 
 | Check | Status | Evidence |
 |---|---|---|
-| `publish-crate` job exists in `release.yml` | ✅ | Lines 95–108: runs after build + test + GitHub Release |
+| `publish-crate` job exists in `release.yml` | ✅ | Runs only after build + test + GitHub Release all succeed |
 | Gated by `PUBLISH_CRATE` variable | ✅ | `if: ${{ vars.PUBLISH_CRATE == 'true' }}` — disabled by default |
 | `CARGO_REGISTRY_TOKEN` secret required | ✅ | Referenced in the publish step |
-| Documentation of gate in `docs/INSTALL.md` | ✅ | Section "crates.io" explains the policy gate |
-| Documentation of gate in `docs/GA_RELEASE.md` | ✅ | Section 5 "crates.io Publication" explains the policy gate |
+| Documentation of gate in `docs/INSTALL.md` | ✅ | Section "crates.io (Secondary)" explains the policy gate |
+| Documentation of gate in `docs/GA_RELEASE.md` | ✅ | Section 5 "crates.io Publication (Secondary)" explains the policy gate |
 
-### 9.5 Release Process Prerequisites (Maintainer Actions)
+### 9.5 GitHub Release Runbook (Maintainer Steps)
 
-Before cutting a release, the maintainer must:
+This is the primary release path. crates.io is not required.
 
-1. **Version bump**: Update `version` in `Cargo.toml` and verify `Cargo.lock` reflects the new version
-2. **Changelog**: Consider adding a `CHANGELOG.md` or rely on GitHub auto-generated release notes
-3. **Tag**: Create and push a `v*` tag (e.g., `git tag v0.1.0 && git push origin v0.1.0`)
-4. **Verify CI**: Ensure the latest `main` commit passes CI before tagging
-5. **Post-release**: Verify the GitHub Release page has all 4 target artifacts with checksums
+1. **Verify CI is green**: confirm the latest `main` commit passes CI (`ci.yml`: check, test, clippy, fmt, doc).
+2. **Set the version**: update `version` in `Cargo.toml` and run `cargo check` to update `Cargo.lock`.
+3. **Create and push the tag** (the tag version must match `Cargo.toml`):
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+4. **The release workflow runs automatically**:
+   - `validate-tag` — confirms tag matches `Cargo.toml` version.
+   - `test` — runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+   - `build` — cross-compiles for all 4 supported targets.
+   - `publish-github` — creates the GitHub Release with auto-generated notes and attaches `.tar.gz` + `.sha256` artifacts.
+5. **Verify the release**: check the GitHub Release page at `https://github.com/fcenedes/RedCouch/releases` for all 4 target artifacts with checksums.
+
+> **Optional**: To also publish to crates.io, set `PUBLISH_CRATE=true` as a repository variable and add `CARGO_REGISTRY_TOKEN` as a secret. The `publish-crate` job will then run automatically after the GitHub Release. See Section 9.4.
 
 ### 9.6 Items Blocked on Maintainer/Policy Confirmation
 
 | Item | Blocker | What's Ready | What's Needed |
 |---|---|---|---|
-| **crates.io publication** | Explicit maintainer confirmation that MIT is the intended license for public crate distribution | `Cargo.toml` metadata complete, `publish-crate` job exists, `LICENSE` file present | Set `PUBLISH_CRATE=true` as a repository variable and add `CARGO_REGISTRY_TOKEN` secret |
-| **First release tag** | Maintainer decision on release timing | CI, release workflow, documentation, and test suite all ready | Push a `v*` tag to trigger the release workflow |
+| **First GitHub Release** | Maintainer decision on release timing | CI, release workflow, documentation, and test suite all ready | Push a `v*` tag to trigger the release workflow |
+| **crates.io publication** (optional) | Explicit maintainer confirmation that MIT is the intended license for public crate distribution | `Cargo.toml` metadata complete, `publish-crate` job exists, `LICENSE` file present | Set `PUBLISH_CRATE=true` as a repository variable and add `CARGO_REGISTRY_TOKEN` secret |
 
 ### 9.7 Verified Facts (Carried Forward)
 

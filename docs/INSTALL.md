@@ -94,26 +94,39 @@ All runtime parameters are compile-time constants. There are no dynamic configur
 | Max frame body | 20 MiB | Maximum body size per binary protocol frame |
 | Max key length | 250 bytes | Maximum memcached key length |
 
-## crates.io
+## Release Process (GitHub Release — Primary)
 
-Source publication to crates.io is **policy-gated**. The `Cargo.toml` metadata is configured, but live publication is disabled until maintainers explicitly confirm the MIT license for public distribution. The release workflow includes a gated `publish-crate` job controlled by the `PUBLISH_CRATE` repository variable.
+**GitHub Releases is the primary distribution channel for RedCouch.** Pre-built module artifacts are published as GitHub Releases with per-target `.tar.gz` archives and SHA-256 checksums. crates.io publication is secondary and not required.
 
-## Release Process
+### Maintainer Steps to Cut a Release
 
-Releases are triggered by pushing a Git tag matching `v*`:
+1. **Ensure `main` is green**: verify the latest commit passes CI (`ci.yml`: check, test, clippy, fmt, doc).
+2. **Set the version** in `Cargo.toml` and run `cargo check` to update `Cargo.lock`.
+3. **Create and push a `v*` tag** whose version matches `Cargo.toml`:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+4. **The release workflow runs automatically** (`.github/workflows/release.yml`):
+   - **`validate-tag`** — confirms the tag version matches `Cargo.toml` (fails fast on mismatch).
+   - **`test`** — runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+   - **`build`** — cross-compiles for all 4 supported targets (Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64).
+   - **`publish-github`** — creates a GitHub Release with auto-generated release notes and attaches `.tar.gz` + `.sha256` artifacts.
+5. **Verify the GitHub Release page** at `https://github.com/fcenedes/RedCouch/releases` shows all 4 target artifacts with checksums.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+### What the Workflow Does Not Do
 
-This triggers the release workflow (`.github/workflows/release.yml`) which:
+- It does **not** publish to crates.io unless the `PUBLISH_CRATE` repository variable is explicitly set to `true` (see below).
+- It does **not** deploy the module to any running Redis instance.
 
-1. Builds release artifacts for all 4 supported targets
-2. Runs tests and clippy checks
-3. Creates a GitHub Release with auto-generated release notes
-4. Attaches `.tar.gz` archives and SHA-256 checksums
-5. Optionally publishes to crates.io (if `PUBLISH_CRATE` is set to `true`)
+## crates.io (Secondary — Policy-Gated)
+
+Source publication to crates.io is **optional and policy-gated**. It is not required for the primary GitHub Release path. The `Cargo.toml` metadata is configured, but live publication is disabled until maintainers explicitly confirm the MIT license for public distribution.
+
+To enable crates.io publication after a GitHub Release:
+1. Set the repository variable `PUBLISH_CRATE` to `true` in GitHub Settings → Variables.
+2. Add a `CARGO_REGISTRY_TOKEN` secret with a valid crates.io API token.
+3. The `publish-crate` job in the release workflow will then run automatically after the GitHub Release is created.
 
 ## Unloading the Module
 
