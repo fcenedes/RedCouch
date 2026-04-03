@@ -74,6 +74,8 @@ print(client.get("greeting"))  # 'hello' (str, not bytes)
 
 You can also pass `flags` directly to `set()` to override the serde's flag value, but this is only needed for advanced use cases.
 
+> **Note:** The remaining steps use a plain client without a serde (as created in Step 1), so `get()` returns raw `bytes`. If you're using the serde client from this step, the returned values will be deserialized strings/objects instead.
+
 ## Step 3: Add and Replace (Conditional Stores)
 
 ```python
@@ -161,7 +163,33 @@ client.touch("session:abc", 300)  # Reset to 5 minutes
 value = client.gat("session:abc", 600)  # Get + set TTL to 10 minutes
 ```
 
-## Step 9: Delete and Flush
+## Step 9: Verify Data in Redis
+
+Because RedCouch stores data in Redis hashes under the `rc:` prefix, you can inspect the data directly while it's still live:
+
+```bash
+# From redis-cli (on the Redis port, not 11210)
+redis-cli
+
+# List RedCouch keys created by the steps above
+KEYS rc:*
+# rc:greeting, rc:session:abc, rc:log, rc:item:0, ...
+
+# Inspect a specific item's internal structure
+HGETALL rc:greeting
+# 1) "v"    ← hex-encoded value
+# 2) "48656c6c6f2066726f6d20507974686f6e21"
+# 3) "f"    ← flags (32-bit integer)
+# 4) "0"
+# 5) "c"    ← CAS token
+# 6) "2"
+```
+
+This dual-access capability is the foundation of RedCouch's migration story — see the [Migration Guide](./migration-guide.md).
+
+## Step 10: Delete and Flush
+
+Once you've finished inspecting the data, clean up:
 
 ```python
 # Delete a single key
@@ -170,24 +198,6 @@ client.delete("greeting")
 # Flush all RedCouch keys (only rc:* keys, not entire Redis DB)
 client.flush_all()
 ```
-
-## Step 10: Verify Data in Redis
-
-Because RedCouch stores data in Redis hashes under the `rc:` prefix, you can inspect the data directly:
-
-```bash
-# From redis-cli (on the Redis port, not 11210)
-redis-cli
-
-# List RedCouch keys
-KEYS rc:*
-
-# Inspect a specific item
-HGETALL rc:greeting
-# Returns: v (hex-encoded value), f (flags), c (CAS token)
-```
-
-This dual-access capability is the foundation of RedCouch's migration story — see the [Migration Guide](./migration-guide.md).
 
 ## Runnable Example
 
