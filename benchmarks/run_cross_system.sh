@@ -79,15 +79,11 @@ echo ""
 REDCOUCH_READY=0
 for i in $(seq 1 10); do
     if python3 -c "
-import socket, sys
+import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(2)
-try:
-    s.connect(('127.0.0.1', $MEMCACHED_PORT))
-    s.close()
-    sys.exit(0)
-except:
-    sys.exit(1)
+s.connect(('127.0.0.1', $MEMCACHED_PORT))
+s.close()
 " 2>/dev/null; then
         echo "  ✅ RedCouch memcached listener ready on port $MEMCACHED_PORT"
         REDCOUCH_READY=1
