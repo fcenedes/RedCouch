@@ -1,8 +1,12 @@
 # Meta Protocol
 
-Meta commands use two-letter prefixes and a flag-based system. They are routed through the ASCII text-protocol path and detected by prefix after ASCII protocol detection.
+The meta protocol is an extension of the ASCII text protocol that provides more control over individual operations through a flag-based system. It uses two-letter command prefixes (`mg`, `ms`, `md`, `ma`, `mn`, `me`) instead of full command words, and flags to select exactly which response fields you want.
 
-Connect via telnet:
+Meta commands are routed through the ASCII text-protocol path — they are detected by prefix after ASCII protocol detection. You use the same TCP connection and can mix standard ASCII and meta commands.
+
+For the complete compatibility table, see [Protocol Compatibility Reference](../reference/protocol-compatibility.md#meta-protocol).
+
+## Connecting
 
 ```bash
 telnet 127.0.0.1 11210
@@ -127,3 +131,10 @@ MN Oping
 Any unsupported flag is rejected with `CLIENT_ERROR unsupported meta flag '<flag>'`.
 
 Proxy hint flags `P` and `L` are silently accepted and ignored on all meta commands.
+
+## Next Steps
+
+- **[ASCII Protocol](./ascii-protocol.md)** — Standard text commands for simpler interactions
+- **[Binary Protocol](./binary-protocol.md)** — Machine-oriented protocol for SDK clients
+- **[Protocol Compatibility Reference](../reference/protocol-compatibility.md#meta-protocol)** — Complete flag tables and unsupported behaviors
+- **[Known Limitations](../reference/limitations.md)** — Deferred meta features (stale items, base64 keys)

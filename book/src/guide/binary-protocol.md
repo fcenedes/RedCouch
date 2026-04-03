@@ -1,10 +1,14 @@
 # Binary Protocol
 
-Binary protocol clients connect to the same port (11210). The protocol is auto-detected from the first byte (`0x80` = binary request magic).
+The binary protocol is the machine-oriented protocol used by Couchbase SDKs and some memcached client libraries. It uses a fixed-size 24-byte header followed by variable-length extras, key, and value fields.
+
+Binary protocol clients connect to the same port (11210) as ASCII clients. RedCouch auto-detects binary protocol when the first byte is `0x80` (the binary request magic byte).
+
+For the complete opcode table and compatibility details, see [Protocol Compatibility Reference](../reference/protocol-compatibility.md#binary-protocol).
 
 ## Overview
 
-The binary protocol is based on the [Couchbase memcached binary protocol](https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md). All 34 opcodes (0x00–0x22, excluding 0x1F) are parsed and dispatched.
+The binary protocol is based on the [Couchbase memcached binary protocol](https://github.com/couchbase/memcached/blob/master/docs/BinaryProtocol.md). All 34 opcodes (0x00–0x22, excluding 0x1F) are parsed and dispatched. This includes quiet variants (which suppress success responses for pipelining) and key-returning variants.
 
 ## Example: Raw Socket Binary Protocol (Python)
 
@@ -65,4 +69,24 @@ sock.close()
 | VERBOSITY | `VERBOSITY` | Accepted, no effect. |
 | SASL AUTH | `SASL_LIST_MECHS`, `SASL_AUTH`, `SASL_STEP` | Stub: auth always succeeds. |
 
-See the [Protocol Compatibility Reference](../reference/protocol-compatibility.md) for the complete specification-level command tables.
+## SASL Authentication
+
+Binary protocol clients (especially Couchbase SDKs) often require SASL authentication before sending data commands. RedCouch supports the SASL handshake but with **stub-only authentication** — all credentials are accepted:
+
+- `SASL_LIST_MECHS` → Returns `PLAIN`
+- `SASL_AUTH` → Always succeeds regardless of username/password
+- `SASL_STEP` → Always succeeds
+
+This allows SASL-requiring clients to connect without code changes. See [Known Limitations](../reference/limitations.md#sasl-authentication) for security implications.
+
+## Quiet Commands and Pipelining
+
+Quiet variants (e.g., `GETQ`, `SETQ`, `DELETEQ`) suppress success responses, enabling efficient pipelining. Send a batch of quiet operations followed by a `NOOP` — the NOOP response signals that all preceding quiet operations have been processed.
+
+RedCouch batches all responses from a read cycle into a single `write_all()` call for efficiency.
+
+## Next Steps
+
+- **[ASCII Protocol](./ascii-protocol.md)** — Human-readable protocol for debugging and simple clients
+- **[Meta Protocol](./meta-protocol.md)** — Flag-based meta commands with fine-grained control
+- **[Protocol Compatibility Reference](../reference/protocol-compatibility.md)** — Complete specification-level command tables

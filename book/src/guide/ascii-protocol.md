@@ -1,10 +1,18 @@
 # ASCII Protocol
 
-Connect using `telnet` or `nc` (netcat):
+The ASCII text protocol is the simplest way to interact with RedCouch. It uses human-readable commands over a plain TCP connection, making it easy to test and debug with standard tools like `telnet` or `nc`.
+
+RedCouch supports all 19 standard memcached ASCII commands. For the complete compatibility table with syntax details, see [Protocol Compatibility Reference](../reference/protocol-compatibility.md#ascii-text-protocol).
+
+## Connecting
 
 ```bash
 telnet 127.0.0.1 11210
+# or
+nc 127.0.0.1 11210
 ```
+
+RedCouch auto-detects ASCII protocol when the first byte is a printable ASCII character (not `0x80`, which routes to binary protocol).
 
 ## Basic Key-Value Operations
 
@@ -124,7 +132,25 @@ flush_all
 OK
 ```
 
-## All Supported ASCII Commands
+## Noreply Mode
+
+Most commands accept a `noreply` suffix that suppresses the server response. This is useful for fire-and-forget writes:
+
+```
+set background-job 0 60 4 noreply
+data
+```
+
+No `STORED` response is sent. If the command is malformed, a `CLIENT_ERROR` may still be emitted because `noreply` cannot always be reliably parsed before the error is detected.
+
+## Next Steps
+
+- **[Meta Protocol](./meta-protocol.md)** — More powerful flag-based commands with richer control
+- **[Binary Protocol](./binary-protocol.md)** — Machine-oriented protocol for high-throughput clients
+- **[Protocol Compatibility Reference](../reference/protocol-compatibility.md)** — Complete syntax and status tables for all commands
+- **[Known Limitations](../reference/limitations.md)** — Counter precision, append growth, and other caveats
+
+## Quick Reference
 
 | Command | Syntax |
 |---|---|

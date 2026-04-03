@@ -1,5 +1,7 @@
 # Protocol Compatibility Reference
 
+This is the definitive reference for RedCouch's protocol support. For tutorial-style examples, see the [User Guide](../guide/ascii-protocol.md).
+
 RedCouch implements three memcached protocol surfaces over a single TCP listener (port 11210). Protocol detection is automatic: the first byte of each connection determines the protocol.
 
 | First Byte | Protocol |
