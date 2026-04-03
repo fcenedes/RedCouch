@@ -37,11 +37,11 @@ jobs:
             os: macos-latest
             artifact: libred_couch.dylib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           key: ${{ matrix.target }}
 
@@ -63,7 +63,7 @@ jobs:
           tar czf redcouch-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
           shasum -a 256 redcouch-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz > redcouch-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: redcouch-${{ matrix.target }}
           path: dist/redcouch-*.tar.gz*
@@ -72,7 +72,7 @@ jobs:
     name: Validate tag matches Cargo.toml
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Check version consistency
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -87,11 +87,11 @@ jobs:
     name: Test before release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
@@ -101,14 +101,14 @@ jobs:
     needs: [validate-tag, build, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
           generate_release_notes: true
           files: artifacts/*
@@ -121,9 +121,9 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ vars.PUBLISH_CRATE == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Publish
         run: cargo publish
         env:
