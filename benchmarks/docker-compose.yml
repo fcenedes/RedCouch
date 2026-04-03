@@ -1,9 +1,11 @@
 # Docker Compose for cross-system benchmark comparison
-# Provides isolated Couchbase OSS and Redis OSS targets.
-# RedCouch runs on a local Redis instance with the module loaded (not containerized).
+# All three targets run as containers for symmetric topology:
+#   1. Redis OSS native      – direct Redis RESP GET/SET/DEL baseline
+#   2. Couchbase OSS         – native memcached binary protocol baseline
+#   3. Redis + RedCouch      – memcached binary protocol via RedCouch module
 #
 # Usage:
-#   docker compose -f benchmarks/docker-compose.yml up -d
+#   docker compose -f benchmarks/docker-compose.yml up -d --build
 #   # Wait for services to be healthy, then run benchmarks
 #   docker compose -f benchmarks/docker-compose.yml down -v
 
@@ -22,6 +24,28 @@ services:
       retries: 10
     restart: "no"
 
+  # Redis + RedCouch module - memcached binary protocol via containerized module
+  # Built from source using benchmarks/Dockerfile.redcouch; same Redis 8 base
+  # and memory settings as redis-bench for environment parity.
+  redcouch-bench:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile.redcouch
+    container_name: redcouch-bench-redcouch
+    ports:
+      - "11210:11210"   # RedCouch memcached binary protocol listener
+      - "16379:6379"    # Redis RESP (for diagnostics only)
+    healthcheck:
+      # Verify both Redis RESP (module host) AND the RedCouch memcached
+      # listener on port 11210.  The module starts its TCP listener in a
+      # background thread, so redis-cli ping alone is not sufficient.
+      test: ["CMD-SHELL", "redis-cli ping && timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/11210'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+    restart: "no"
+
   # Couchbase Community Edition - for native memcached binary protocol baseline
   # Uses Couchbase 7.2 Community which supports memcached bucket type
   couchbase-bench:
@@ -31,7 +55,7 @@ services:
       - "8091:8091"    # Web console
       - "8092:8092"    # Views
       - "8093:8093"    # Query
-      - "11211:11210"  # KV/memcached binary protocol (mapped to 11211 to avoid RedCouch conflict)
+      - "11211:11210"  # KV/memcached binary protocol (mapped to 11211 to avoid conflict)
     environment:
       - COUCHBASE_ADMINISTRATOR_USERNAME=admin
       - COUCHBASE_ADMINISTRATOR_PASSWORD=password

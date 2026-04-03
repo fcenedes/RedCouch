@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────
-# Cross-System Benchmark Runner
+# Cross-System Benchmark Runner (Symmetric Topology)
 #
-# Orchestrates a three-way comparison:
-#   1. Redis + RedCouch (memcached binary protocol via module)
-#   2. Redis OSS native (direct RESP GET/SET/DEL)
+# Orchestrates a three-way comparison with ALL targets running
+# in Docker containers for environment parity:
+#   1. Redis + RedCouch (memcached binary protocol via module, Docker)
+#   2. Redis OSS native (direct RESP GET/SET/DEL, Docker)
 #   3. Couchbase OSS (memcached binary protocol, Docker)
 #
 # Usage:
 #   bash benchmarks/run_cross_system.sh
 #
 # Prerequisites:
-#   - docker compose (for Redis OSS + Couchbase containers)
-#   - redis-server 8+ in PATH (for RedCouch module)
-#   - cargo build --release (module must be built)
+#   - docker compose (all three systems run as containers)
 #   - python3 in PATH
 #
 # Environment variables:
@@ -29,20 +28,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Detect module
-MODULE="$ROOT_DIR/target/release/libred_couch.dylib"
-[ -f "$MODULE" ] || MODULE="$ROOT_DIR/target/release/libred_couch.so"
-if [ ! -f "$MODULE" ]; then
-    echo "ERROR: Module not found. Run 'cargo build --release' first."
-    exit 1
-fi
-
-REDIS_PORT=16379         # RedCouch's Redis instance
-MEMCACHED_PORT=11210     # RedCouch listener
+MEMCACHED_PORT=11210     # RedCouch listener (Docker)
 REDIS_NATIVE_PORT=16380  # Docker Redis OSS
 COUCHBASE_PORT=11211     # Docker Couchbase KV
-REDIS_DIR=$(mktemp -d)
-REDIS_PID=""
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$SCRIPT_DIR/results"
 RESULT_FILE="$RESULTS_DIR/cross_system_${TIMESTAMP}.json"
@@ -51,33 +39,31 @@ LATEST_FILE="$RESULTS_DIR/cross_system_latest.json"
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    if [ -n "$REDIS_PID" ] && kill -0 "$REDIS_PID" 2>/dev/null; then
-        kill "$REDIS_PID" 2>/dev/null || true
-        wait "$REDIS_PID" 2>/dev/null || true
-    fi
-    rm -rf "$REDIS_DIR"
-    # Stop Docker containers
+    # Stop all Docker containers
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" down -v 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "═══════════════════════════════════════════════════════════"
-echo "Cross-System Benchmark Runner"
+echo "Cross-System Benchmark Runner (Symmetric Docker Topology)"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
-# 1. Start Docker containers (Redis OSS + Couchbase)
-echo "Starting Docker containers..."
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d
-echo "  Waiting for containers to be healthy..."
-sleep 5
+# 1. Build and start all Docker containers (Redis OSS + Couchbase + RedCouch)
+#    --wait blocks until every service's healthcheck passes, so we don't need
+#    separate sleep/polling loops.  The RedCouch healthcheck verifies both
+#    Redis RESP and the memcached listener on port 11210.
+echo "Building and starting Docker containers (waiting for health checks)..."
+docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d --build --wait --wait-timeout 120
+echo "  All containers healthy."
 
-# Verify Redis OSS container
+# Belt-and-suspenders: confirm each target is reachable from the host.
+echo ""
 if redis-cli -p "$REDIS_NATIVE_PORT" PING 2>/dev/null | grep -q "PONG"; then
     echo "  ✅ Redis OSS native ready on port $REDIS_NATIVE_PORT"
 else
     echo "ERROR: Redis OSS native not responding on port $REDIS_NATIVE_PORT"
-    echo "  Docker container may not have started. Check: docker compose -f benchmarks/docker-compose.yml logs redis-bench"
+    echo "  Check: docker compose -f benchmarks/docker-compose.yml logs redis-bench"
     exit 1
 fi
 
@@ -88,48 +74,27 @@ bash "$SCRIPT_DIR/setup_couchbase.sh" || {
     exit 1
 }
 
-# 3. Start local Redis with RedCouch module
+# 3. Final RedCouch reachability check (should already be healthy from --wait)
 echo ""
-echo "Starting Redis + RedCouch module..."
-redis-server \
-    --port "$REDIS_PORT" \
-    --dir "$REDIS_DIR" \
-    --daemonize no \
-    --loglevel notice \
-    --loadmodule "$MODULE" \
-    &>"$REDIS_DIR/redis.log" &
-REDIS_PID=$!
-
-# Wait for RedCouch listener
-echo "Waiting for RedCouch listener on port $MEMCACHED_PORT..."
 REDCOUCH_READY=0
-for i in $(seq 1 15); do
+for i in $(seq 1 10); do
     if python3 -c "
-import socket, sys
+import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(1)
-try:
-    s.connect(('127.0.0.1', $MEMCACHED_PORT))
-    s.close()
-    sys.exit(0)
-except:
-    sys.exit(1)
+s.settimeout(2)
+s.connect(('127.0.0.1', $MEMCACHED_PORT))
+s.close()
 " 2>/dev/null; then
-        echo "  ✅ RedCouch ready after ${i}s"
+        echo "  ✅ RedCouch memcached listener ready on port $MEMCACHED_PORT"
         REDCOUCH_READY=1
         break
-    fi
-    if ! kill -0 "$REDIS_PID" 2>/dev/null; then
-        echo "ERROR: Redis+RedCouch process exited. Log:"
-        tail -20 "$REDIS_DIR/redis.log" 2>/dev/null || true
-        exit 1
     fi
     sleep 1
 done
 if [ "$REDCOUCH_READY" -ne 1 ]; then
-    echo "ERROR: RedCouch listener never became ready on port $MEMCACHED_PORT"
-    echo "  Redis log tail:"
-    tail -20 "$REDIS_DIR/redis.log" 2>/dev/null || true
+    echo "ERROR: RedCouch listener not reachable on port $MEMCACHED_PORT"
+    echo "  Container logs:"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" logs redcouch-bench 2>/dev/null | tail -20
     exit 1
 fi
 

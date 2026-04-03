@@ -427,10 +427,11 @@ def main():
         "platform": platform.platform(),
         "python": platform.python_version(),
         "systems_tested": [s["name"] for s in systems],
+        "topology": os.environ.get("BENCH_TOPOLOGY", "symmetric_docker"),
         "systems_config": {
-            "redis_redcouch": {"host": REDCOUCH_HOST, "port": REDCOUCH_PORT, "protocol": "memcached_binary"},
-            "redis_native": {"host": REDIS_NATIVE_HOST, "port": REDIS_NATIVE_PORT, "protocol": "resp"},
-            "couchbase_oss": {"host": COUCHBASE_HOST, "port": COUCHBASE_PORT, "protocol": "memcached_binary"},
+            "redis_redcouch": {"host": REDCOUCH_HOST, "port": REDCOUCH_PORT, "protocol": "memcached_binary", "runtime": "docker"},
+            "redis_native": {"host": REDIS_NATIVE_HOST, "port": REDIS_NATIVE_PORT, "protocol": "resp", "runtime": "docker"},
+            "couchbase_oss": {"host": COUCHBASE_HOST, "port": COUCHBASE_PORT, "protocol": "memcached_binary", "runtime": "docker"},
         },
     }
 
