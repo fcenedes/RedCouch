@@ -28,6 +28,15 @@
 
 ---
 
+# Tutorials & Examples
+
+- [Python Client Tutorial](./tutorials/python-client.md)
+- [Multi-Language Examples](./tutorials/multi-language.md)
+- [Migration Guide](./tutorials/migration-guide.md)
+- [Use Cases](./tutorials/use-cases.md)
+
+---
+
 # Operations
 
 - [Benchmarks & Performance](./operations/benchmarks.md)

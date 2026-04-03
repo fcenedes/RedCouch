@@ -74,6 +74,7 @@ Protocol is detected once per connection and fixed for its lifetime. A single Re
 
 - **[Getting Started](./getting-started/installation.md)** — Install RedCouch, load it into Redis, and run your first commands.
 - **[User Guide](./guide/ascii-protocol.md)** — Walkthrough examples for each protocol: ASCII, meta, and binary.
+- **[Tutorials & Examples](./tutorials/python-client.md)** — Step-by-step tutorials, multi-language client examples, migration guide, and real-world use cases.
 - **[Reference](./reference/protocol-compatibility.md)** — Complete protocol compatibility tables, architecture details, configuration reference, and known limitations.
 - **[Operations](./operations/benchmarks.md)** — Performance benchmarks, release process, and operational guidance.
 - **[Development](./development/contributing.md)** — How to contribute, test architecture, and coding standards.

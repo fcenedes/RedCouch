@@ -149,6 +149,9 @@ cd tests/integration && bash run_e2e.sh
 
 ## Next Steps
 
+- **[Python Client Tutorial](../tutorials/python-client.md)** — Step-by-step Python walkthrough with pymemcache
+- **[Multi-Language Examples](../tutorials/multi-language.md)** — Node.js, Go, PHP, and CLI examples
+- **[Migration Guide](../tutorials/migration-guide.md)** — Three-phase migration from memcached to native Redis
 - **[ASCII Protocol](../guide/ascii-protocol.md)** — Full walkthrough of all 19 ASCII commands
 - **[Meta Protocol](../guide/meta-protocol.md)** — Flag-based meta commands with fine-grained control
 - **[Binary Protocol](../guide/binary-protocol.md)** — Machine-oriented protocol for SDK clients
