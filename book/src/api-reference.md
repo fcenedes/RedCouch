@@ -57,10 +57,11 @@ The links on this page point into the `api/` subtree, so they work on the publis
 
 ## CI Validation
 
-The CI pipeline validates that API documentation builds without warnings:
+The CI pipeline validates that both the API documentation and the book build cleanly on every push to `main` and on pull requests:
 
 ```bash
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+mdbook build
 ```
 
-This runs on every push to `main` and on pull requests, ensuring documentation stays in sync with the code.
+This ensures documentation stays in sync with the code and catches broken links or build errors before merging.

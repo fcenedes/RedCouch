@@ -2,3 +2,5 @@
 target/
 .tmp/
 book/output/
+__pycache__/
+*.pyc
