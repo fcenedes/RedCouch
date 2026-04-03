@@ -26,33 +26,53 @@ value = client.get("greeting")
 print(value)  # b'Hello from Python!'
 ```
 
-The `get()` method returns `bytes` by default. If you want strings, use a deserializer:
+The `get()` method returns `bytes` by default. To decode to a string, call `.decode()`:
 
 ```python
-client = Client(("127.0.0.1", 11210), default_noreply=False)
 value = client.get("greeting")
 print(value.decode("utf-8"))  # 'Hello from Python!'
 ```
 
-## Step 2: Flags and Expiration
+## Step 2: Flags and Expiration with a Serde
 
-Memcached flags are a 32-bit integer stored alongside the value. They're commonly used to indicate serialization format. Expiration is in seconds (up to 30 days) or a Unix timestamp (for longer durations).
+Memcached flags are a 32-bit integer stored alongside the value. They're commonly used to indicate serialization format. In pymemcache, flags are managed by a **serde** (serializer/deserializer) object that you pass to the `Client` constructor.
+
+Expiration is in seconds (up to 30 days) or a Unix timestamp (for longer durations).
 
 ```python
 import json
 
-# Store JSON data with a flags marker and 60-second TTL
-data = {"user": "alice", "role": "admin"}
-client.set("session:abc", json.dumps(data).encode(), expire=60, flags=1)
+class JSONSerde:
+    """Serialize non-string values as JSON, using flags to track the format."""
+    def serialize(self, key, value):
+        if isinstance(value, str):
+            return value.encode("utf-8"), 0  # flag 0 = raw string
+        return json.dumps(value).encode("utf-8"), 1  # flag 1 = JSON
 
-# Retrieve with flags
-result = client.get("session:abc", return_flags=True)
-# result is (b'{"user": "alice", "role": "admin"}', 1)
-value, flags = result
-if flags == 1:
-    parsed = json.loads(value)
-    print(parsed["user"])  # 'alice'
+    def deserialize(self, key, value, flags):
+        if flags == 0:
+            return value.decode("utf-8")
+        if flags == 1:
+            return json.loads(value)
+        return value  # fallback: return raw bytes
+
+# Create a client with the JSON serde
+client = Client(("127.0.0.1", 11210), serde=JSONSerde())
+
+# Store a Python dict — the serde serializes it as JSON with flag=1
+data = {"user": "alice", "role": "admin"}
+client.set("session:abc", data, expire=60)
+
+# Retrieve — the serde deserializes based on the stored flag
+result = client.get("session:abc")
+print(result["user"])  # 'alice'
+
+# Store a plain string — the serde uses flag=0
+client.set("greeting", "hello")
+print(client.get("greeting"))  # 'hello' (str, not bytes)
 ```
+
+You can also pass `flags` directly to `set()` to override the serde's flag value, but this is only needed for advanced use cases.
 
 ## Step 3: Add and Replace (Conditional Stores)
 
