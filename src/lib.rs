@@ -17,9 +17,9 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BytesMut};
 #[cfg(not(test))]
 use protocol::{
-    CAS_ZERO, MAGIC_REQ, MAX_BODY_LEN, Opcode, ParseResult, Request, ST_ARGS, ST_IX, ST_NF,
-    ST_NOT_STORED, ST_OK, ST_UNK, try_parse_request, write_error_for_raw_opcode, write_response,
-    write_simple_response,
+    CAS_ZERO, MAGIC_REQ, MAX_BODY_LEN, Opcode, ParseResult, Request, ResponseMeta, ST_ARGS, ST_IX,
+    ST_NF, ST_NOT_STORED, ST_OK, ST_UNK, try_parse_request, write_error_for_raw_opcode,
+    write_response, write_simple_response,
 };
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -975,9 +975,11 @@ fn op_get(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     write_response(
         out,
         opcode,
-        ST_OK,
-        req.hdr.opaque,
-        cas,
+        &ResponseMeta {
+            status: ST_OK,
+            opaque: req.hdr.opaque,
+            cas,
+        },
         &extras,
         key_part,
         &value_bytes,
@@ -1056,7 +1058,18 @@ fn op_store(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
                 STAT_CAS_HITS.fetch_add(1, Ordering::Relaxed);
             }
             if !opcode.is_quiet() {
-                write_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[])?;
+                write_response(
+                    out,
+                    opcode,
+                    &ResponseMeta {
+                        status: ST_OK,
+                        opaque: req.hdr.opaque,
+                        cas: new_cas,
+                    },
+                    &[],
+                    &[],
+                    &[],
+                )?;
             }
         }
         -1 => {
@@ -1248,9 +1261,11 @@ fn op_counter(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
                 write_response(
                     out,
                     opcode,
-                    ST_OK,
-                    req.hdr.opaque,
-                    new_cas,
+                    &ResponseMeta {
+                        status: ST_OK,
+                        opaque: req.hdr.opaque,
+                        cas: new_cas,
+                    },
                     &[],
                     &[],
                     &counter_val.to_be_bytes(),
@@ -1406,9 +1421,11 @@ fn op_gat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     write_response(
         out,
         opcode,
-        ST_OK,
-        req.hdr.opaque,
-        cas,
+        &ResponseMeta {
+            status: ST_OK,
+            opaque: req.hdr.opaque,
+            cas,
+        },
         &extras,
         key_part,
         &value_bytes,
@@ -1475,7 +1492,18 @@ fn op_append_prepend(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     match status_code {
         0 => {
             if !opcode.is_quiet() {
-                write_response(out, opcode, ST_OK, req.hdr.opaque, new_cas, &[], &[], &[])?;
+                write_response(
+                    out,
+                    opcode,
+                    &ResponseMeta {
+                        status: ST_OK,
+                        opaque: req.hdr.opaque,
+                        cas: new_cas,
+                    },
+                    &[],
+                    &[],
+                    &[],
+                )?;
             }
         }
         -5 => {
@@ -1731,13 +1759,16 @@ fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
             ("max_connections", MAX_CONNECTIONS.to_string()),
         ];
 
+        let stat_meta = ResponseMeta {
+            status: ST_OK,
+            opaque: req.hdr.opaque,
+            cas: CAS_ZERO,
+        };
         for (name, value) in &stats {
             write_response(
                 out,
                 opcode,
-                ST_OK,
-                req.hdr.opaque,
-                CAS_ZERO,
+                &stat_meta,
                 &[],
                 name.as_bytes(),
                 value.as_bytes(),
@@ -1749,7 +1780,18 @@ fn op_stat(req: Request<'_>, out: &mut Vec<u8>) -> Br<()> {
     // These are intentionally unsupported in the GA release.
 
     // Terminator: empty key + empty value.
-    write_response(out, opcode, ST_OK, req.hdr.opaque, CAS_ZERO, &[], &[], &[])?;
+    write_response(
+        out,
+        opcode,
+        &ResponseMeta {
+            status: ST_OK,
+            opaque: req.hdr.opaque,
+            cas: CAS_ZERO,
+        },
+        &[],
+        &[],
+        &[],
+    )?;
     Ok(())
 }
 

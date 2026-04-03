@@ -83,6 +83,17 @@ enum StoreOp {
     Replace,
 }
 
+/// Groups the item-metadata parameters for an ASCII store operation,
+/// keeping the `ascii_store` function under clippy's argument limit.
+#[cfg(not(test))]
+struct StoreParams {
+    op: StoreOp,
+    flags: u32,
+    exptime: u32,
+    cas: u64,
+    noreply: bool,
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RetrievalOp {
     Get,
@@ -95,9 +106,7 @@ enum RetrievalOp {
 enum CmdParseResult<'a> {
     Ok(AsciiCmd<'a>),
     UnknownCommand,
-    // The String payload is read by the `#[cfg(not(test))]` connection
-    // handler but appears unused under `--all-targets` test builds.
-    ClientError(#[cfg_attr(test, allow(dead_code))] String),
+    ClientError(String),
 }
 
 // ── Line extraction ─────────────────────────────────────────────────
@@ -726,13 +735,15 @@ fn dispatch_cmd(cmd: AsciiCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br
             noreply,
             ..
         } => ascii_store(
-            cmd,
+            &StoreParams {
+                op: cmd,
+                flags,
+                exptime,
+                cas: 0,
+                noreply,
+            },
             key,
-            flags,
-            exptime,
-            0,
             data.unwrap_or(&[]),
-            noreply,
             out,
         ),
         AsciiCmd::Cas {
@@ -743,13 +754,15 @@ fn dispatch_cmd(cmd: AsciiCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -> Br
             noreply,
             ..
         } => ascii_store(
-            StoreOp::Set,
+            &StoreParams {
+                op: StoreOp::Set,
+                flags,
+                exptime,
+                cas: cas_unique,
+                noreply,
+            },
             key,
-            flags,
-            exptime,
-            cas_unique,
             data.unwrap_or(&[]),
-            noreply,
             out,
         ),
         AsciiCmd::AppendPrepend {
@@ -868,27 +881,17 @@ fn dispatch_meta_cmd(cmd: MetaCmd<'_>, data: Option<&[u8]>, out: &mut Vec<u8>) -
 
 /// Handle set/add/replace/cas.
 #[cfg(not(test))]
-#[allow(clippy::too_many_arguments)]
-fn ascii_store(
-    op: StoreOp,
-    key: &[u8],
-    flags: u32,
-    exptime: u32,
-    cas: u64,
-    value: &[u8],
-    noreply: bool,
-    out: &mut Vec<u8>,
-) -> Br<()> {
+fn ascii_store(params: &StoreParams, key: &[u8], value: &[u8], out: &mut Vec<u8>) -> Br<()> {
     STAT_CMD_SET.fetch_add(1, Ordering::Relaxed);
     let rk = make_redis_key(key);
-    let op_name = match op {
+    let op_name = match params.op {
         StoreOp::Set => "set",
         StoreOp::Add => "add",
         StoreOp::Replace => "replace",
     };
-    let cas_str = cas.to_string();
-    let flags_str = flags.to_string();
-    let expiry_str = exptime.to_string();
+    let cas_str = params.cas.to_string();
+    let flags_str = params.flags.to_string();
+    let expiry_str = params.exptime.to_string();
 
     let reply = with_ctx(|ctx| {
         let keys_and_args: &[&[u8]] = &[
@@ -904,6 +907,8 @@ fn ascii_store(
         eval_lua(ctx, &SCRIPT_STORE, keys_and_args)
     })
     .map_err(|e| BridgeErr::Redis(e.to_string()))?;
+
+    let noreply = params.noreply;
 
     if is_redis_error(&reply) {
         if !noreply {
@@ -927,7 +932,7 @@ fn ascii_store(
         }
     };
 
-    let is_cas_op = cas != 0;
+    let is_cas_op = params.cas != 0;
     match status_code {
         0 => {
             if is_cas_op {
@@ -2326,10 +2331,10 @@ mod tests {
 
     #[test]
     fn parse_set_missing_args() {
-        assert!(matches!(
-            parse_command_line(b"set k 0"),
-            CmdParseResult::ClientError(_)
-        ));
+        match parse_command_line(b"set k 0") {
+            CmdParseResult::ClientError(msg) => assert!(!msg.is_empty()),
+            other => panic!("expected ClientError, got {other:?}"),
+        }
     }
 
     #[test]
