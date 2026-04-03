@@ -125,51 +125,62 @@ The comparison covers common key-value operations across three systems:
 |---|---|---|
 | **Common key operations** | GET (hit/miss), SET (64B), DELETE | Core data-path throughput and latency for the most frequent operations in a migration path |
 
-### 3.2 Systems Compared
+### 3.2 Systems Compared (Symmetric Docker Topology)
+
+All three systems run as Docker containers with identical resource constraints (256 MB maxmemory, no persistence) for a true apples-to-apples comparison.
 
 | System | Description | Data Path | Benchmark Transport |
 |---|---|---|---|
 | **Couchbase OSS** | Couchbase Community 7.2.4, memcached bucket (Docker container) | Native KV engine, memcached binary protocol | memcached binary over TCP (port 11211) |
 | **Redis OSS native** | Redis 8 (Docker container) with native `GET`/`SET`/`DEL` commands | Direct Redis data structure access; no protocol translation | RESP protocol over TCP (port 16380) |
-| **Redis + RedCouch** | Redis 8.4.0 (local) with RedCouch module; memcached binary on port 11210 | TCP listener → binary parse → Lua hex encode/decode → `HSET`/`HGETALL` → response | memcached binary over TCP (port 11210) |
+| **Redis + RedCouch** | Redis 8 + RedCouch module (Docker container, built from source) | TCP listener → binary parse → Lua hex encode/decode → `HSET`/`HGETALL` → response | memcached binary over TCP (port 11210) |
 
-### 3.3 Measured Three-Way Comparison
+### 3.3 Measured Three-Way Comparison (Symmetric)
 
-Source: `benchmarks/results/cross_system_20260402_223529.json` (tag: `cross-system-v1`, macOS arm64, Python 3.13.5 harness, 5s per workload).
+Source: `benchmarks/results/cross_system_20260403_092550.json` (symmetric Docker topology, macOS arm64, Python 3.13.5 harness, 5s per workload, all three systems containerized).
 
 #### Single Client (c=1)
 
 | Operation | RedCouch ops/s | RedCouch p99 µs | Redis OSS ops/s | Redis OSS p99 µs | Couchbase ops/s | Couchbase p99 µs |
 |---|---|---|---|---|---|---|
-| SET 64B | 31,400 | 64 | 8,206 | 210 | 8,086 | 214 |
-| GET (hit) | 18,063 | 79 | 8,721 | 187 | 8,300 | 195 |
-| GET (miss) | 35,914 | 55 | 8,659 | 193 | 8,158 | 196 |
-| DELETE | 39,879 | 60 | 8,486 | 191 | 8,184 | 194 |
+| SET 64B | 7,873 | 199 | 8,039 | 209 | 8,666 | 163 |
+| GET (hit) | 6,776 | 226 | 8,294 | 187 | 8,360 | 185 |
+| GET (miss) | 8,264 | 190 | 8,265 | 195 | 8,249 | 203 |
+| DELETE | 8,421 | 190 | 8,402 | 193 | 8,471 | 187 |
 
 #### Four Clients (c=4)
 
 | Operation | RedCouch ops/s | RedCouch p99 µs | Redis OSS ops/s | Redis OSS p99 µs | Couchbase ops/s | Couchbase p99 µs |
 |---|---|---|---|---|---|---|
-| SET 64B | 67,560 | 119 | 20,215 | 349 | 22,014 | 291 |
-| GET (hit) | 25,635 | 220 | 19,140 | 367 | 21,675 | 356 |
-| GET (miss) | 68,827 | 129 | 19,936 | 340 | 22,527 | 269 |
-| DELETE | 69,409 | 124 | 21,151 | 317 | 22,250 | 273 |
+| SET 64B | 20,710 | 323 | 19,236 | 368 | 19,757 | 528 |
+| GET (hit) | 15,098 | 515 | 18,351 | 394 | 21,985 | 314 |
+| GET (miss) | 21,992 | 290 | 19,903 | 353 | 22,376 | 274 |
+| DELETE | 22,986 | 263 | 21,236 | 321 | 22,090 | 277 |
 
 ### 3.4 Measured Findings and Interpretation
 
-**Measured fact**: In this benchmark, RedCouch showed 2–4× higher throughput and 2–3× lower latency than both Redis OSS native and Couchbase OSS across all four workloads at both concurrency levels.
+**Measured fact**: Under symmetric Docker topology, all three systems perform within the same order of magnitude (~7k–9k ops/s at c=1, ~15k–23k ops/s at c=4). There is no dramatic throughput gap between them; differences are modest and workload-dependent.
 
-**Critical methodology caveat — network topology asymmetry**: RedCouch ran on local Redis 8.4.0 (host-native process), while Redis OSS and Couchbase OSS ran in Docker containers. The Docker networking layer adds measurable overhead (typically 50–150 µs per round-trip on macOS Docker Desktop). **The RedCouch advantage in raw numbers is substantially inflated by this asymmetry.** The comparison is not a true apples-to-apples measurement of engine performance.
+**Key findings**:
 
-**What the data does show**:
-1. **Redis OSS and Couchbase OSS are closely matched** (~8k–9k ops/s at c=1, ~20k–22k ops/s at c=4) when both run in identical Docker containers, confirming the harness produces comparable results for same-transport-cost systems.
-2. **RedCouch is not slower than either containerized system** — even with its Lua hex-encode bridge overhead, RedCouch on a local Redis instance outperforms containerized alternatives. This is encouraging for migration scenarios where RedCouch and Redis run on the same host.
-3. **GET (hit) is RedCouch's most expensive operation** relative to its other operations (~18k vs ~31k–40k for SET/miss/DELETE at c=1), consistent with the Lua hex-decode overhead on the read path documented in Section 4.3.
+1. **All three systems are closely matched at c=1** (~7.9k–8.7k ops/s for SET, ~8.2k–8.5k ops/s for DELETE). The Docker networking layer dominates single-client latency for all three, placing them within ±10% of each other for most operations.
+2. **GET (hit) is RedCouch's most expensive operation**: at c=1, RedCouch achieves ~6,776 ops/s vs ~8,300 ops/s for Redis OSS and Couchbase, a ~18–19% deficit. This is consistent with the Lua hex-decode overhead on the read path (documented in Section 4.3). At c=4, this gap widens to ~15k vs ~18k–22k ops/s.
+3. **SET, GET (miss), and DELETE scale comparably**: at c=4, RedCouch is competitive with or slightly ahead of Redis OSS native for SET (20.7k vs 19.2k), GET miss (22.0k vs 19.9k), and DELETE (23.0k vs 21.2k). Couchbase is generally within the same range.
+4. **Zero errors across all systems**: all 24 workload runs (4 operations × 3 systems × 2 concurrency levels) completed with 0 errors.
+
+**What this means for migration**:
+- **RedCouch is a viable drop-in bridge**: the Lua hex-encode/decode overhead imposes a measurable but modest cost (~18% on GET hit at c=1), not a performance cliff. For migration scenarios, the protocol translation layer does not introduce order-of-magnitude penalties.
+- **The migration path to native Redis removes the bridge overhead**: once clients migrate from memcached binary protocol to native Redis RESP commands, the Lua translation layer is eliminated entirely.
+- **GET (hit) is the primary optimization target** if further RedCouch performance tuning is desired (see Section 4.3).
 
 **What the data does not show**:
-- Engine-to-engine performance comparison with Docker overhead removed. A true apples-to-apples test would require running all three systems on bare metal or all three in containers.
+- Bare-metal performance without Docker networking overhead — all three systems pay the same Docker transport cost.
 - Large-payload (1KB, 64KB) comparisons — only 64B values were tested in the cross-system harness.
-- Behavior under sustained high load, connection churn, or mixed workloads.
+- Behavior under sustained high load, connection churn, or mixed workloads (see Section 2 and Section 6 for RedCouch-only stress/soak results).
+
+### 3.4.1 Superseded Asymmetric Comparison (Historical Reference)
+
+The prior cross-system comparison (`cross_system_20260402_223529.json`) ran RedCouch on host-native Redis while Redis OSS and Couchbase ran in Docker containers. That topology asymmetry inflated RedCouch's apparent advantage by 2–4× due to Docker networking overhead on macOS. **Those numbers are superseded by the symmetric comparison above.** The asymmetric artifact is retained in the repository for traceability only.
 
 ### 3.5 RedCouch-Only Baselines (Local, No Docker)
 
@@ -196,24 +207,27 @@ These are architectural expectations, **not measured cross-system facts**:
 
 ### 3.7 Measurement Methodology
 
+- **Symmetric topology**: All three systems run as Docker containers via `benchmarks/docker-compose.yml` with identical resource constraints (256 MB maxmemory, no persistence). RedCouch is built from source in a multi-stage Docker build (`benchmarks/Dockerfile.redcouch`) using the same Redis 8 base image as the Redis OSS benchmark container.
 - **Cross-system harness**: `benchmarks/bench_cross_system.py` — drives identical workload profiles against all three systems under the same client, duration, and concurrency parameters.
 - **Single-system harness**: `benchmarks/bench_binary_protocol.py` — comprehensive RedCouch-only benchmark with 10 workload profiles.
-- **Environment setup**: `benchmarks/docker-compose.yml` provisions isolated Couchbase OSS (Community 7.2.4, memcached bucket) and Redis OSS (Redis 8) containers. `benchmarks/setup_couchbase.sh` initializes the Couchbase cluster and memcached bucket.
-- **Reproducibility**: `bash benchmarks/run_cross_system.sh` runs the full setup → benchmark → teardown flow.
+- **Environment setup**: `benchmarks/docker-compose.yml` provisions Couchbase OSS (Community 7.2.4, memcached bucket), Redis OSS (Redis 8), and Redis + RedCouch (Redis 8 + module built from source). `benchmarks/setup_couchbase.sh` initializes the Couchbase cluster and memcached bucket.
+- **Reproducibility**: `bash benchmarks/run_cross_system.sh` runs the full setup → benchmark → teardown flow. Uses `docker compose up --build --wait` for health-checked startup.
 
 ### 3.8 Benchmark Artifact Provenance
 
 | Artifact | Path | Tag/Ref | Content |
 |---|---|---|---|
-| **Cross-system comparison** | `benchmarks/results/cross_system_20260402_223529.json` | `cross-system-v1` | 4 workloads × 3 systems × 2 concurrency levels |
+| **Cross-system comparison (symmetric)** | `benchmarks/results/cross_system_20260403_092550.json` | symmetric rerun | 4 workloads × 3 systems × 2 concurrency levels, all Docker |
+| Cross-system comparison (asymmetric, superseded) | `benchmarks/results/cross_system_20260402_223529.json` | `cross-system-v1` | Superseded: RedCouch host-native, others Docker |
 | RedCouch-only baseline | `benchmarks/results/bench_20260402_144029.json` | `verifier-wave9b` | 10 workloads × 2 concurrency levels (c=1, c=4) |
 | Stress/soak results | `benchmarks/results/stress_20260402_150543.json` | git ref `891847b` | 7-phase stress suite |
 | Cross-system harness | `benchmarks/bench_cross_system.py` | — | Three-way comparison driver |
 | Cross-system runner | `benchmarks/run_cross_system.sh` | — | Docker Compose orchestration + benchmark flow |
-| Docker Compose | `benchmarks/docker-compose.yml` | — | Couchbase Community 7.2.4 + Redis 8 |
+| Docker Compose | `benchmarks/docker-compose.yml` | — | Couchbase Community 7.2.4 + Redis 8 + RedCouch (all containerized) |
+| RedCouch Dockerfile | `benchmarks/Dockerfile.redcouch` | — | Multi-stage build: Rust source → Redis 8 module container |
 | Couchbase setup | `benchmarks/setup_couchbase.sh` | — | Cluster init + memcached bucket creation |
 | Single-system harness | `benchmarks/bench_binary_protocol.py` | — | Python 3.13.5, RedCouch-only benchmark |
-| Platform | macOS 15.7.4, arm64 | — | Redis 8.4.0 (local), Docker containers |
+| Platform | macOS 15.7.4, arm64 | — | Docker Desktop, Python 3.13.5 |
 
 ---
 
@@ -354,7 +368,7 @@ Test categories cover: parser round-trips, opcode coverage, quiet/base mapping, 
 - [x] **Unit tests pass**: `cargo test` — 221 tests (76 binary + 97 ASCII + 48 meta), 0 failures
 - [x] **E2E integration suite**: live Redis 8.4.0 binary-client verification
 - [x] **Benchmark baseline captured**: artifact with provenance tag `verifier-wave9b`
-- [x] **Cross-system comparison**: three-way measured comparison (Couchbase OSS, Redis OSS, RedCouch) with artifact `cross_system_20260402_223529.json`
+- [x] **Cross-system comparison**: symmetric three-way measured comparison (Couchbase OSS, Redis OSS, RedCouch — all Docker) with artifact `cross_system_20260403_092550.json`
 - [x] **Stress/soak validation**: 7-phase suite, 0 errors, stable memory, clean malformed handling
 
 ### Documentation
