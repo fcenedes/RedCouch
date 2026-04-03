@@ -307,16 +307,22 @@ pub fn parse_request(buf: &[u8]) -> Option<(Request<'_>, usize)> {
 
 // ── Response building ────────────────────────────────────────────────
 
+/// Groups the protocol-level metadata fields that every binary response
+/// carries.  Using a struct avoids exceeding clippy's argument limit on
+/// the response-writing functions.
+pub struct ResponseMeta {
+    pub status: u16,
+    pub opaque: u32,
+    pub cas: u64,
+}
+
 /// Write a complete binary-protocol response to `w` using a raw opcode byte.
 /// This is the low-level writer; prefer [`write_response`] when you have
 /// a known `Opcode`.
-#[allow(clippy::too_many_arguments)]
 pub fn write_raw_response(
     w: &mut impl Write,
     opcode_byte: u8,
-    status: u16,
-    opaque: u32,
-    cas: u64,
+    meta: &ResponseMeta,
     extras: &[u8],
     key: &[u8],
     value: &[u8],
@@ -327,10 +333,10 @@ pub fn write_raw_response(
     hdr[1] = opcode_byte;
     BigEndian::write_u16(&mut hdr[2..4], key.len() as u16);
     hdr[4] = extras.len() as u8;
-    BigEndian::write_u16(&mut hdr[6..8], status);
+    BigEndian::write_u16(&mut hdr[6..8], meta.status);
     BigEndian::write_u32(&mut hdr[8..12], total_body);
-    BigEndian::write_u32(&mut hdr[12..16], opaque);
-    BigEndian::write_u64(&mut hdr[16..24], cas);
+    BigEndian::write_u32(&mut hdr[12..16], meta.opaque);
+    BigEndian::write_u64(&mut hdr[16..24], meta.cas);
     w.write_all(&hdr)?;
     w.write_all(extras)?;
     w.write_all(key)?;
@@ -339,18 +345,15 @@ pub fn write_raw_response(
 }
 
 /// Write a complete binary-protocol response to `w`.
-#[allow(clippy::too_many_arguments)]
 pub fn write_response(
     w: &mut impl Write,
     opcode: Opcode,
-    status: u16,
-    opaque: u32,
-    cas: u64,
+    meta: &ResponseMeta,
     extras: &[u8],
     key: &[u8],
     value: &[u8],
 ) -> io::Result<()> {
-    write_raw_response(w, opcode as u8, status, opaque, cas, extras, key, value)
+    write_raw_response(w, opcode as u8, meta, extras, key, value)
 }
 
 /// Convenience: write a simple response with no extras or key.
@@ -362,7 +365,18 @@ pub fn write_simple_response(
     cas: u64,
     body: &[u8],
 ) -> io::Result<()> {
-    write_response(w, opcode, status, opaque, cas, &[], &[], body)
+    write_response(
+        w,
+        opcode,
+        &ResponseMeta {
+            status,
+            opaque,
+            cas,
+        },
+        &[],
+        &[],
+        body,
+    )
 }
 
 /// Write an error response for an unknown or malformed opcode, using
@@ -374,7 +388,18 @@ pub fn write_error_for_raw_opcode(
     opaque: u32,
     body: &[u8],
 ) -> io::Result<()> {
-    write_raw_response(w, opcode_byte, status, opaque, CAS_ZERO, &[], &[], body)
+    write_raw_response(
+        w,
+        opcode_byte,
+        &ResponseMeta {
+            status,
+            opaque,
+            cas: CAS_ZERO,
+        },
+        &[],
+        &[],
+        body,
+    )
 }
 
 // ── Helper to build a raw request frame ──────────────────────────────
@@ -742,7 +767,19 @@ mod tests {
     fn write_response_with_body() {
         let mut out = Vec::new();
         let extras = 0u32.to_be_bytes();
-        write_response(&mut out, Opcode::Get, ST_OK, 5, 100, &extras, &[], b"val").expect("write");
+        write_response(
+            &mut out,
+            Opcode::Get,
+            &ResponseMeta {
+                status: ST_OK,
+                opaque: 5,
+                cas: 100,
+            },
+            &extras,
+            &[],
+            b"val",
+        )
+        .expect("write");
         assert_eq!(out.len(), HEADER_LEN + 4 + 3);
         assert_eq!(out[4], 4);
         assert_eq!(BigEndian::read_u32(&out[8..12]), 7);
@@ -757,9 +794,11 @@ mod tests {
         write_response(
             &mut out,
             Opcode::GetK,
-            ST_OK,
-            0,
-            1,
+            &ResponseMeta {
+                status: ST_OK,
+                opaque: 0,
+                cas: 1,
+            },
             &extras,
             b"mykey",
             b"myval",
@@ -1001,7 +1040,19 @@ mod tests {
         let key = b"mykey";
         let value = b"myvalue";
         let mut out = Vec::new();
-        write_response(&mut out, Opcode::GetK, ST_OK, 0, 1, &extras, key, value).unwrap();
+        write_response(
+            &mut out,
+            Opcode::GetK,
+            &ResponseMeta {
+                status: ST_OK,
+                opaque: 0,
+                cas: 1,
+            },
+            &extras,
+            key,
+            value,
+        )
+        .unwrap();
         let body_len = BigEndian::read_u32(&out[8..12]);
         assert_eq!(body_len as usize, extras.len() + key.len() + value.len());
     }
@@ -1021,7 +1072,19 @@ mod tests {
     fn response_key_len_field_correct() {
         let key = b"testkey";
         let mut out = Vec::new();
-        write_response(&mut out, Opcode::GetK, ST_OK, 0, 1, &[0u8; 4], key, b"val").unwrap();
+        write_response(
+            &mut out,
+            Opcode::GetK,
+            &ResponseMeta {
+                status: ST_OK,
+                opaque: 0,
+                cas: 1,
+            },
+            &[0u8; 4],
+            key,
+            b"val",
+        )
+        .unwrap();
         let key_len = BigEndian::read_u16(&out[2..4]);
         assert_eq!(key_len as usize, key.len());
     }
@@ -1031,7 +1094,19 @@ mod tests {
     fn response_extras_len_field_correct() {
         let extras = [0u8; 4];
         let mut out = Vec::new();
-        write_response(&mut out, Opcode::Get, ST_OK, 0, 1, &extras, &[], b"val").unwrap();
+        write_response(
+            &mut out,
+            Opcode::Get,
+            &ResponseMeta {
+                status: ST_OK,
+                opaque: 0,
+                cas: 1,
+            },
+            &extras,
+            &[],
+            b"val",
+        )
+        .unwrap();
         assert_eq!(out[4], 4);
     }
 
@@ -1040,7 +1115,19 @@ mod tests {
     fn response_raw_opcode_echo() {
         for raw in [0x00u8, 0xFE, 0xFF, 0x42] {
             let mut out = Vec::new();
-            write_raw_response(&mut out, raw, ST_OK, 0, 0, &[], &[], &[]).unwrap();
+            write_raw_response(
+                &mut out,
+                raw,
+                &ResponseMeta {
+                    status: ST_OK,
+                    opaque: 0,
+                    cas: 0,
+                },
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
             assert_eq!(out[1], raw);
         }
     }

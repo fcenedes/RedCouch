@@ -1,0 +1,449 @@
+{
+  "meta": {
+    "timestamp": "2026-04-03T07:26:04.110147+00:00",
+    "duration_s": 5,
+    "client_counts": [
+      1,
+      4
+    ],
+    "tag": "",
+    "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
+    "python": "3.13.5",
+    "systems_tested": [
+      "redis_redcouch",
+      "redis_native",
+      "couchbase_oss"
+    ],
+    "topology": "symmetric_docker",
+    "systems_config": {
+      "redis_redcouch": {
+        "host": "127.0.0.1",
+        "port": 11210,
+        "protocol": "memcached_binary",
+        "runtime": "docker"
+      },
+      "redis_native": {
+        "host": "127.0.0.1",
+        "port": 16380,
+        "protocol": "resp",
+        "runtime": "docker"
+      },
+      "couchbase_oss": {
+        "host": "127.0.0.1",
+        "port": 11211,
+        "protocol": "memcached_binary",
+        "runtime": "docker"
+      }
+    }
+  },
+  "results": [
+    {
+      "workload": "set_64B",
+      "system": "redis_redcouch",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 39372,
+      "throughput_ops_sec": 7872.9,
+      "latency_us": {
+        "p50": 123.58301319181919,
+        "p95": 160.4580320417881,
+        "p99": 199.26217442844066,
+        "max": 8644.582994747907,
+        "mean": 126.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "redis_redcouch",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 33907,
+      "throughput_ops_sec": 6776.3,
+      "latency_us": {
+        "p50": 144.9170522391796,
+        "p95": 184.11238561384383,
+        "p99": 226.4505170751366,
+        "max": 1027.4170199409127,
+        "mean": 147.4
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "redis_redcouch",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 41357,
+      "throughput_ops_sec": 8263.5,
+      "latency_us": {
+        "p50": 118.04094538092613,
+        "p95": 152.24999515339732,
+        "p99": 190.22704567760238,
+        "max": 875.7500327192247,
+        "mean": 120.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "redis_redcouch",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 42134,
+      "throughput_ops_sec": 8420.7,
+      "latency_us": {
+        "p50": 115.54098455235362,
+        "p95": 149.54101061448455,
+        "p99": 190.1392714353277,
+        "max": 5320.417054463178,
+        "mean": 118.6
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "set_64B",
+      "system": "redis_redcouch",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 103587,
+      "throughput_ops_sec": 20709.8,
+      "latency_us": {
+        "p50": 186.12499115988612,
+        "p95": 263.8339647091925,
+        "p99": 323.470514267683,
+        "max": 6337.667000479996,
+        "mean": 192.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "redis_redcouch",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 75508,
+      "throughput_ops_sec": 15097.8,
+      "latency_us": {
+        "p50": 256.58297818154097,
+        "p95": 403.74998934566975,
+        "p99": 514.8691852809856,
+        "max": 977.9580286704004,
+        "mean": 264.7
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "redis_redcouch",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 109985,
+      "throughput_ops_sec": 21992.3,
+      "latency_us": {
+        "p50": 176.87497893348336,
+        "p95": 243.58299560844898,
+        "p99": 289.7079777903855,
+        "max": 1372.8750054724514,
+        "mean": 181.7
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "redis_redcouch",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 114947,
+      "throughput_ops_sec": 22985.7,
+      "latency_us": {
+        "p50": 170.20804807543755,
+        "p95": 228.7919633090496,
+        "p99": 262.95799762010574,
+        "max": 2139.875025022775,
+        "mean": 173.8
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "set_64B",
+      "system": "redis_native",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 40224,
+      "throughput_ops_sec": 8038.9,
+      "latency_us": {
+        "p50": 121.2084898725152,
+        "p95": 158.41068525332952,
+        "p99": 209.2307031853122,
+        "max": 2982.625039294362,
+        "mean": 124.2
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "redis_native",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 41492,
+      "throughput_ops_sec": 8293.8,
+      "latency_us": {
+        "p50": 118.41603554785252,
+        "p95": 150.58343124110252,
+        "p99": 186.9617780903353,
+        "max": 776.3749454170465,
+        "mean": 120.4
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "redis_native",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 41365,
+      "throughput_ops_sec": 8264.8,
+      "latency_us": {
+        "p50": 119.12500485777855,
+        "p95": 152.87502901628613,
+        "p99": 194.74996952340007,
+        "max": 452.1670052781701,
+        "mean": 120.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "redis_native",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 42016,
+      "throughput_ops_sec": 8402.4,
+      "latency_us": {
+        "p50": 116.91602412611246,
+        "p95": 150.3750099800527,
+        "p99": 193.0642640218137,
+        "max": 626.1250237002969,
+        "mean": 118.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "set_64B",
+      "system": "redis_native",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 96252,
+      "throughput_ops_sec": 19235.8,
+      "latency_us": {
+        "p50": 195.7500062417239,
+        "p95": 309.5840220339596,
+        "p99": 367.6447493489838,
+        "max": 4241.375019773841,
+        "mean": 207.7
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "redis_native",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 91772,
+      "throughput_ops_sec": 18350.8,
+      "latency_us": {
+        "p50": 204.54201148822904,
+        "p95": 334.2079580761492,
+        "p99": 394.3750052712858,
+        "max": 3762.6659614033997,
+        "mean": 217.8
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "redis_native",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 99540,
+      "throughput_ops_sec": 19903.4,
+      "latency_us": {
+        "p50": 189.665996003896,
+        "p95": 302.33297729864717,
+        "p99": 353.33362000528723,
+        "max": 4383.916035294533,
+        "mean": 200.8
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "redis_native",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 106208,
+      "throughput_ops_sec": 21236.3,
+      "latency_us": {
+        "p50": 180.0829777494073,
+        "p95": 276.2909862212837,
+        "p99": 320.7499976269901,
+        "max": 734.4590267166495,
+        "mean": 188.2
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "set_64B",
+      "system": "couchbase_oss",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 43333,
+      "throughput_ops_sec": 8665.8,
+      "latency_us": {
+        "p50": 112.95900912955403,
+        "p95": 141.33303193375468,
+        "p99": 162.65356447547674,
+        "max": 1397.959014866501,
+        "mean": 115.3
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "couchbase_oss",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 41802,
+      "throughput_ops_sec": 8359.8,
+      "latency_us": {
+        "p50": 114.79202657938004,
+        "p95": 151.0840345872566,
+        "p99": 184.95632568374242,
+        "max": 1143.5420019552112,
+        "mean": 119.5
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "couchbase_oss",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 41277,
+      "throughput_ops_sec": 8249.1,
+      "latency_us": {
+        "p50": 116.33301619440317,
+        "p95": 156.62499936297536,
+        "p99": 203.38484086096278,
+        "max": 2956.7499877884984,
+        "mean": 121.1
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "couchbase_oss",
+      "clients": 1,
+      "duration_s": 5.0,
+      "total_ops": 42396,
+      "throughput_ops_sec": 8470.9,
+      "latency_us": {
+        "p50": 114.95902435854077,
+        "p95": 150.58403369039297,
+        "p99": 187.0440464699642,
+        "max": 640.9999914467335,
+        "mean": 117.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "set_64B",
+      "system": "couchbase_oss",
+      "clients": 4,
+      "duration_s": 5.01,
+      "total_ops": 98920,
+      "throughput_ops_sec": 19757.1,
+      "latency_us": {
+        "p50": 182.45895626023412,
+        "p95": 300.9160776855424,
+        "p99": 527.8710095444684,
+        "max": 19298.541999887675,
+        "mean": 202.2
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_hit",
+      "system": "couchbase_oss",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 109950,
+      "throughput_ops_sec": 21985.3,
+      "latency_us": {
+        "p50": 175.33398931846023,
+        "p95": 247.52255994826567,
+        "p99": 313.7508418876673,
+        "max": 1362.3330160044134,
+        "mean": 181.7
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "get_miss",
+      "system": "couchbase_oss",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 111901,
+      "throughput_ops_sec": 22375.8,
+      "latency_us": {
+        "p50": 174.33299217373133,
+        "p95": 235.99999258294702,
+        "p99": 274.24999279901385,
+        "max": 706.1659707687795,
+        "mean": 178.6
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    },
+    {
+      "workload": "delete",
+      "system": "couchbase_oss",
+      "clients": 4,
+      "duration_s": 5.0,
+      "total_ops": 110473,
+      "throughput_ops_sec": 22090.3,
+      "latency_us": {
+        "p50": 175.70797353982925,
+        "p95": 237.45797807350755,
+        "p99": 276.8749836832285,
+        "max": 10555.70802418515,
+        "mean": 180.9
+      },
+      "errors": 0,
+      "error_rate": 0.0
+    }
+  ]
+}

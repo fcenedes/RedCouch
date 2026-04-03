@@ -39,9 +39,7 @@ pub(crate) enum MetaCmd<'a> {
 #[derive(Debug)]
 pub(crate) enum MetaParseResult<'a> {
     Ok(MetaCmd<'a>),
-    // The String payload is read by the `#[cfg(not(test))]` handler in
-    // ascii.rs but appears unused under `--all-targets` test builds.
-    ClientError(#[cfg_attr(test, allow(dead_code))] String),
+    ClientError(String),
     /// ms needs a data block of this size
     NeedData(MetaCmd<'a>, u32),
 }
@@ -569,7 +567,7 @@ mod tests {
     #[test]
     fn missing_key_error() {
         match parse_meta_command(b"mg") {
-            MetaParseResult::ClientError(_) => {}
+            MetaParseResult::ClientError(msg) => assert!(!msg.is_empty()),
             other => panic!("expected error, got {other:?}"),
         }
     }
